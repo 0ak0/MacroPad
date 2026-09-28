@@ -372,7 +372,7 @@ class Inspector(QWidget):
 
     # -------------------------------------------------------------- banner
 
-    def show_problem(self, diag, note=None):
+    def show_problem(self, diag, note=None, offer_detect=False):
         if diag is None or diag.ready:
             if not note:
                 self.banner.hide()
@@ -390,7 +390,7 @@ class Inspector(QWidget):
         self.banner_fix.setFixedHeight(lh * max(1, len(cmds)) + 30)
         self.banner_fix.setVisible(bool(cmds))
         self.banner_copy.setVisible(bool(cmds))
-        self.banner_action.setVisible(diag.status == "unsupported")
+        self.banner_action.setVisible(diag.status == "unsupported" or offer_detect)
         self.banner_action.setText("Ask the pad what it is")
         if diag.fix and diag.fix[-1].startswith("#"):
             self.banner_text.setText(self.banner_text.text() + "\n\nThen unplug the pad and plug it back in.")
@@ -750,6 +750,12 @@ class Window(QMainWindow):
         # Pads the user has identified by asking them. Remembered so the app
         # doesn't go back to calling them unsupported on the next check.
         self.adopted = set(self.settings.value("adopted", []) or [])
+        # What the pad says its shape is, asked once per pad. A USB id does
+        # not pin down a layout: 1189:8840 covers the 12 key pad this was
+        # built on and a 15 key, 3 knob sibling.
+        self.reported = None                 # (keys, knobs) or None
+        self.shape_checked = set()
+        self.shape_note = ""
 
         root = QWidget()
         outer = QVBoxLayout(root)
@@ -786,6 +792,12 @@ class Window(QMainWindow):
             box.valueChanged.connect(self._resize_layout)
             self.spin[name] = box
             eb.addWidget(box)
+        eb.addSpacing(12)
+        self.knob_side_btn = _button("Knobs: right", "flat")
+        self.knob_side_btn.setToolTip(
+            "Which side of the keys your knobs are on")
+        self.knob_side_btn.clicked.connect(self._flip_knob_side)
+        eb.addWidget(self.knob_side_btn)
         eb.addStretch()
         self.edit_done = _button("Done", "primary")
         self.edit_cancel = _button("Cancel", "flat")
@@ -1057,7 +1069,9 @@ class Window(QMainWindow):
             "unsupported": "Unsupported pad",
             "unsupported-os": "Not supported on this system",
         }[self.diag.status])
-        self.inspector.show_problem(self.diag, self.note)
+        self._check_shape()
+        self.inspector.show_problem(self.diag, self.note or self.shape_note,
+                                    offer_detect=bool(self.shape_note))
         self.inspector.show_background(bool(act.listener_pid()))
         if self.diag.status != old:
             self._refresh(editor=False)
@@ -1156,6 +1170,39 @@ class Window(QMainWindow):
             self.read_btn.setText("Read pad")
         self._refresh()
 
+    def _check_shape(self):
+        """
+        Ask a working pad how many keys and knobs it has and say something
+        if that disagrees with the drawing.
+
+        The query runs once per pad; the comparison runs every poll, so
+        fixing the layout by hand clears the note straight away.
+        """
+        dev = self.diag.device if self.diag else None
+        if not self.diag or not self.diag.ready or not dev:
+            self.shape_note = ""
+            return
+        tag = f"{dev.vid}:{dev.pid}@{dev.path}"
+        if tag not in self.shape_checked:
+            self.shape_checked.add(tag)
+            try:
+                self.reported = core.read_info(dev)
+            except Exception:                # a pad that won't answer is fine
+                self.reported = None
+        if not self.reported:
+            self.shape_note = ""
+            return
+        keys, knobs = self.reported
+        lay = self.state.layout
+        if (keys, knobs) == (lay.keys, lay.knobs):
+            self.shape_note = ""
+            return
+        self.shape_note = (
+            f"This pad says it has {keys} keys and {knobs} "
+            f"knob{'s' if knobs != 1 else ''}, but it is drawn with "
+            f"{lay.keys} and {lay.knobs}. Ask it what it is and the drawing "
+            f"will match.")
+
     def _identify(self):
         """
         Interrogate a pad we don't recognise. Reads only. If it answers
@@ -1188,6 +1235,8 @@ class Window(QMainWindow):
         self.desired.clear()
         self.adopted.add(f"{dev.vid}:{dev.pid}")
         self.settings.setValue("adopted", sorted(self.adopted))
+        self.reported = (layout.keys, layout.knobs)
+        self.shape_note = ""
         self._poll()
         self._say(f"It says {layout.keys} keys and {layout.knobs} "
                   f"knob{'s' if layout.knobs != 1 else ''}. Check the drawing "
@@ -1210,6 +1259,8 @@ class Window(QMainWindow):
                 self.spin[name].blockSignals(True)
                 self.spin[name].setValue(value)
                 self.spin[name].blockSignals(False)
+            self.knob_side_btn.setText(f"Knobs: {self.state.layout.knob_side}")
+            self.knob_side_btn.setEnabled(bool(self.state.layout.knobs))
             self._say("")
         elif not keep:
             self._set_layout(self.editing_from)
@@ -1224,6 +1275,12 @@ class Window(QMainWindow):
         self.pad.select(None if on else self.pad.current)
         self.pad.set_editing(on)
         self._refresh()
+
+    def _flip_knob_side(self):
+        side = "left" if self.state.layout.knob_side == "right" else "right"
+        self._set_layout(self.state.layout.with_knobs_on(side))
+        self.knob_side_btn.setText(f"Knobs: {side}")
+        self.pad.set_editing(True)
 
     def _set_layout(self, layout):
         self.state.layout = layout

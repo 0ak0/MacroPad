@@ -203,19 +203,40 @@ class PadView(QWidget):
         # from a knob's centre down to the bottom of its legend rows
         stack = R_OUT + ROW_GAP + len(core.DIAL_ACTIONS) * ROW_H
 
+        # Sides are named for the pad lying flat, so standing it upright
+        # turns them: knobs on the right go along the top, knobs on the
+        # left along the bottom.
+        left = lay.knob_side == "left" and bool(lay.knobs)
+
+        keys_w = grid_cols * (K + G) - G
+        keys_h = grid_rows * (K + G) - G
+        # how much room the knobs need across, and down from the first centre
+        dials_w = lay.knobs * (DIAL_W + G) - G if lay.knobs else 0
+        dials_h = (R_OUT + (lay.knobs - 1) * (stack + 20 + R_OUT) + stack
+                   if lay.knobs else 0)
+
         if self.orientation == "upright":
-            # knobs in a row above the keys
-            span = max(grid_cols * (K + G) - G, lay.knobs * (DIAL_W + G))
+            # knobs in a row, above the keys or below them. Whichever of the
+            # two is narrower gets centred against the other.
+            span = max(keys_w, dials_w)
             step = span / max(lay.knobs, 1)
-            dial_centres = [QPointF(M + step * (i + 0.5), M + R_OUT)
+            band = (R_OUT + stack + 28) if lay.knobs else 0
+            grid_left = M + max(0.0, (span - keys_w) / 2)
+            grid_top = M if left else M + band
+            keys_bottom = grid_top + keys_h
+            y = (keys_bottom + 28 + R_OUT) if left else (M + R_OUT)
+            dial_centres = [QPointF(M + step * (i + 0.5), y)
                             for i in range(lay.knobs)]
-            grid_top = M + (R_OUT + stack + 28 if lay.knobs else 0)
-            grid_left = M
         else:
-            # knobs in a column down the right
-            grid_top, grid_left = M, M
-            x = M + grid_cols * (K + G) + 30 + DIAL_W / 2
-            dial_centres = [QPointF(x, M + R_OUT + i * (stack + 20 + R_OUT))
+            # knobs in a column, down whichever side the pad wears them.
+            # Three knobs of legends are taller than three rows of keys, so
+            # centre the shorter one rather than leaving a hole in the board.
+            grid_top = M + max(0.0, (dials_h - keys_h) / 2)
+            grid_left = M + (DIAL_W + 30 if left else 0)
+            x = (M + DIAL_W / 2) if left else \
+                (grid_left + keys_w + G + 30 + DIAL_W / 2)
+            top = M + max(0.0, (keys_h - dials_h) / 2)
+            dial_centres = [QPointF(x, top + R_OUT + i * (stack + 20 + R_OUT))
                             for i in range(lay.knobs)]
 
         self.cells = {}

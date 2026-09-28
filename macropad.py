@@ -65,6 +65,19 @@ for _i in range(1, 13):
 for _i in range(13, 25):
     KEYCODES[f"f{_i}"] = 0x68 + _i - 13   # F13 = 0x68 .. F24 = 0x73
 
+# The keypad block, HID usages 0x53 to 0x63. Pads in this family ship from
+# the factory with keypad bindings on the slots the vendor software doesn't
+# show, so without these a first read of a brand new pad reports controls it
+# can't name.
+KEYCODES.update({
+    "numlock": 0x53, "numpadslash": 0x54, "numpadstar": 0x55,
+    "numpadminus": 0x56, "numpadplus": 0x57, "numpadenter": 0x58,
+    "numpaddot": 0x63,
+})
+for _i in range(1, 10):
+    KEYCODES[f"numpad{_i}"] = 0x58 + _i   # numpad1 = 0x59 .. numpad9 = 0x61
+KEYCODES["numpad0"] = 0x62
+
 # Media keys live on the Consumer usage page, sent as a 16-bit value.
 MEDIA_KEYS = {
     "play": 0x00CD, "pause": 0x00CD, "playpause": 0x00CD,

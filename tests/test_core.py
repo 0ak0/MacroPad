@@ -218,6 +218,23 @@ class ReadingThePad(unittest.TestCase):
         self.assertEqual(phantom, {0x0d, 0x0e, 0x0f,       # keys 13 to 15
                                    0x16, 0x17, 0x18})      # a third knob
 
+    def test_the_same_replies_decode_fully_for_a_bigger_pad(self):
+        """
+        Those six slots are only phantom because THIS pad is 12 keys and 2
+        knobs. A 15 key, 3 knob sibling shares the USB id and answers the
+        same 24 slots for real, so decoding has to follow the layout rather
+        than a module level constant.
+        """
+        big = core.Layout(15, 3, 3, 5)
+        configs = [r for r in self.got if r[1] == proto.MAGIC_READ]
+        decoded = [core.decode_config(r, big) for r in configs]
+        self.assertEqual(sum(d is None for d in decoded), 0)
+
+        layer1 = {d[0] for d in decoded if d[1] == 1}
+        self.assertEqual(layer1, set(big.control_ids))
+        self.assertIn("key15", layer1)
+        self.assertIn("dial3-right", layer1)
+
     def test_reading_fills_in_the_state(self):
         from unittest import mock
         replies = [r for r in self.got if r[1] == proto.MAGIC_READ and r[3] == 1]
@@ -231,6 +248,168 @@ class ReadingThePad(unittest.TestCase):
             self.assertFalse(any(fresh.get(c).unknown for c in core.CONTROL_IDS))
             self.assertEqual(fresh.get("dial2-push").binding,
                              core.Binding(media="calculator"))
+
+
+class KnobSide(unittest.TestCase):
+    """
+    Not every pad wears its knobs on the right. accdias's 15 key pad has
+    three down the left, one above two.
+    """
+
+    def test_default_is_right(self):
+        self.assertEqual(core.Layout().knob_side, "right")
+        self.assertEqual(core.DEFAULT_LAYOUT.knob_side, "right")
+
+    def test_flip_and_back(self):
+        lay = core.Layout(15, 3, 3, 5)
+        self.assertEqual(lay.with_knobs_on("left").knob_side, "left")
+        self.assertEqual(lay.with_knobs_on("left").with_knobs_on("right"), lay)
+
+    def test_nonsense_side_is_refused(self):
+        with self.assertRaises(ValueError):
+            core.Layout(15, 3, 3, 5, knob_side="up")
+
+    def test_survives_a_round_trip(self):
+        lay = core.Layout(15, 3, 3, 5).with_knobs_on("left")
+        self.assertEqual(core.Layout.from_json(json.loads(json.dumps(lay.to_json()))),
+                         lay)
+
+    def test_old_files_still_load_as_right(self):
+        old = {"keys": 12, "knobs": 2, "rows": 3, "cols": 4, "name": ""}
+        self.assertEqual(core.Layout.from_json(old).knob_side, "right")
+
+    def test_resizing_keeps_the_side(self):
+        lay = core.Layout(15, 3, 3, 5).with_knobs_on("left")
+        self.assertEqual(lay.resized(keys=12, knobs=2).knob_side, "left")
+
+    def test_the_drawing_actually_moves(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from macropad_gui import padview
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        QApplication.instance() or QApplication([])
+        view = padview.PadView()
+        view.resize(1000, 700)
+
+        def dial_x(side):
+            lay = core.Layout(15, 3, 3, 5).with_knobs_on(side)
+            view.set_layout(lay)
+            view.set_orientation("flat")
+            return (view.dials["dial1"].x(),
+                    min(r.x() for r in view.keys.values()))
+
+        knob_r, keys_r = dial_x("right")
+        knob_l, keys_l = dial_x("left")
+        self.assertGreater(knob_r, keys_r, "knobs should sit right of the keys")
+        self.assertLess(knob_l, keys_l, "knobs should sit left of the keys")
+
+
+class BoardBalance(unittest.TestCase):
+    """
+    Three knobs' worth of legends is taller than three rows of keys. The
+    shorter of the two gets centred against the other, so the board has no
+    large empty corner.
+    """
+
+    def view(self, layout, orientation="flat"):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from macropad_gui import padview
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        QApplication.instance() or QApplication([])
+        v = padview.PadView()
+        v.resize(1000, 700)
+        v.set_layout(layout)
+        v.set_orientation(orientation)
+        return v
+
+    def middles(self, v):
+        from macropad_gui import padview
+        keys = list(v.keys.values())
+        key_mid = (min(r.top() for r in keys) + max(r.bottom() for r in keys)) / 2
+        # dials are centres, not rectangles; their legends hang underneath
+        dial_top = min(c.y() for c in v.dials.values()) - padview.R_OUT
+        dial_bottom = max(r.bottom() for r in v.rows.values())
+        return key_mid, (dial_top + dial_bottom) / 2
+
+    def test_keys_and_knobs_share_a_centre_line(self):
+        for side in ("left", "right"):
+            v = self.view(core.Layout(15, 3, 3, 5).with_knobs_on(side))
+            key_mid, dial_mid = self.middles(v)
+            self.assertLess(abs(key_mid - dial_mid), 60,
+                            f"knobs on the {side}: centres {key_mid} vs {dial_mid}")
+
+    def test_no_large_empty_band_under_the_keys(self):
+        v = self.view(core.Layout(15, 3, 3, 5).with_knobs_on("left"))
+        keys_bottom = max(r.bottom() for r in v.keys.values())
+        keys_top = min(r.top() for r in v.keys.values())
+        below = v.board.bottom() - keys_bottom
+        above = keys_top - v.board.top()
+        # the gap under the keys used to be the whole dial column
+        self.assertLess(below, above + 140)
+
+    def test_a_tall_pad_still_works(self):
+        v = self.view(core.Layout(15, 1, 5, 3))
+        key_mid, dial_mid = self.middles(v)
+        self.assertLess(abs(key_mid - dial_mid), 60)
+
+
+class KeypadKeys(unittest.TestCase):
+    """
+    The capture shows this pad left the factory with keypad combinations on
+    key slots 13 to 15. We could send those bytes but not name them, so a
+    read came back as an unknown binding.
+    """
+
+    def test_the_factory_bindings_in_the_capture_now_have_names(self):
+        reports = core.read_capture(
+            str(CAPTURES / "1189-8840-read.txt"), incoming=True)
+        big = core.Layout(15, 3, 3, 5)
+        for report in reports:
+            if report[1] != proto.MAGIC_READ:
+                continue
+            self.assertIsNotNone(core.decode_config(report, big),
+                                 f"action 0x{report[2]:02x} still has no name")
+
+    def test_round_trip(self):
+        for name in ("numpad0", "numpad5", "numpad9", "numpadplus",
+                     "numpadenter", "numpaddot", "numlock"):
+            b = core.Binding(keys=name)
+            report = b.reports(3, core.action_byte("key1"), 1)[0]
+            self.assertEqual(core.decode_config(report), ("key1", 1, b), name)
+
+    def test_they_are_distinct_from_the_number_row(self):
+        for i in range(10):
+            self.assertNotEqual(proto.KEYCODES[str(i)],
+                                proto.KEYCODES[f"numpad{i}"])
+
+
+class ShapeGuess(unittest.TestCase):
+    """
+    The pad reports counts, never geometry. The guess has to land wider
+    than it is tall, because every pad in this family is.
+    """
+
+    def guess(self, keys, knobs):
+        d = core.Detection(speaks=True, keys=keys, knobs=knobs)
+        return d.layout.rows, d.layout.cols
+
+    def test_real_pads(self):
+        self.assertEqual(self.guess(12, 2), (3, 4))    # the pad this was built on
+        self.assertEqual(self.guess(15, 3), (3, 5))    # accdias's, confirmed by him
+        self.assertEqual(self.guess(9, 1), (3, 3))
+        self.assertEqual(self.guess(6, 1), (2, 3))
+        self.assertEqual(self.guess(3, 1), (1, 3))
+
+    def test_never_taller_than_wide(self):
+        for keys in range(1, proto.KEY_SLOTS + 1):
+            rows, cols = self.guess(keys, 0)
+            self.assertLessEqual(rows, cols, f"{keys} keys guessed {rows}x{cols}")
+            self.assertEqual(rows * cols, keys)
 
 
 class Detection(unittest.TestCase):
@@ -257,7 +436,9 @@ class Detection(unittest.TestCase):
         d = self.run_detect()
         self.assertTrue(d.speaks, d.why)
         self.assertEqual((d.keys, d.knobs), (12, 2))
-        self.assertEqual(d.layout, core.Layout(12, 2, 4, 3))
+        # 3 rows of 4, the way the pad is actually printed. The guess used
+        # to come out transposed and every pad was drawn on its side.
+        self.assertEqual(d.layout, core.Layout(12, 2, 3, 4))
         self.assertEqual(d.bindings["dial1-left"], core.Binding(media="volumedown"))
 
     def test_silence_is_not_taken_as_yes(self):

@@ -79,12 +79,15 @@ class Layout:
     cols: int = 4
     name: str = ""
     places: tuple = ()      # ((row, col), ...) per key; empty means left to right
+    knob_side: str = "right"    # which side of the keys the knobs sit on
 
     def __post_init__(self):
         if not 1 <= self.keys <= proto.KEY_SLOTS:
             raise ValueError(f"a pad can have 1 to {proto.KEY_SLOTS} keys")
         if not 0 <= self.knobs <= proto.KNOB_SLOTS:
             raise ValueError(f"a pad can have up to {proto.KNOB_SLOTS} knobs")
+        if self.knob_side not in ("left", "right"):
+            raise ValueError("knobs sit on the left or the right")
         if self.rows * self.cols < self.keys:
             raise ValueError(f"{self.rows}x{self.cols} can't hold "
                              f"{self.keys} keys")
@@ -107,6 +110,16 @@ class Layout:
     def rearranged(self, places):
         """The same pad with its keys in different spots."""
         return replace(self, places=tuple((int(r), int(c)) for r, c in places))
+
+    def with_knobs_on(self, side):
+        """
+        The same pad with its knobs down the other side.
+
+        Sides are named for the pad lying flat. Standing it upright turns
+        the whole board, so knobs on the right end up along the top and
+        knobs on the left along the bottom.
+        """
+        return replace(self, knob_side=side)
 
     def resized(self, rows=None, cols=None, keys=None, knobs=None):
         """
@@ -162,16 +175,21 @@ class Layout:
 
     def to_json(self):
         d = {"keys": self.keys, "knobs": self.knobs,
-             "rows": self.rows, "cols": self.cols, "name": self.name}
+             "rows": self.rows, "cols": self.cols, "name": self.name,
+             "knob_side": self.knob_side}
         if self.places:
             d["places"] = [list(p) for p in self.places]
         return d
 
     @classmethod
     def from_json(cls, d):
+        # knob_side is newer than the file format. Files written before it
+        # existed describe pads with knobs on the right, which was the only
+        # thing the drawing could do.
         return cls(keys=int(d["keys"]), knobs=int(d["knobs"]),
                    rows=int(d["rows"]), cols=int(d["cols"]),
                    name=d.get("name", ""),
+                   knob_side=d.get("knob_side", "right"),
                    places=tuple(tuple(p) for p in d.get("places", ())))
 
 
@@ -747,16 +765,22 @@ def decode_info(report):
     return report[2], report[3]
 
 
-def decode_config(report):
+def decode_config(report, layout=None):
     """
     The inverse of Binding.reports()[0]: (control, layer, Binding) from a
     native config report, or None if it isn't one we understand. Used to
     import captures and to prove round trips in the tests.
+
+    layout decides which slots count as real controls, and it matters more
+    than it looks. The firmware answers for 15 keys and 3 knobs whatever
+    the pad actually has, so the caller has to say how big the pad is.
+    Decode a 15 key pad against the default 12 key layout and keys 13 to 15
+    and the whole third knob are dropped on the floor without a word.
     """
     if len(report) < 13 or report[1] not in (proto.MAGIC_NATIVE, proto.MAGIC_READ):
         return None
     action, layer, kind = report[2], report[3], report[4]
-    control = CONTROL_FOR_ACTION.get(action)
+    control = (layout or DEFAULT_LAYOUT).control_for_action.get(action)
     if control is None:
         return None
     delay = report[5] | (report[6] << 8)
@@ -816,7 +840,7 @@ def read_capture(path, incoming=False):
     return out
 
 
-def import_capture(path, state):
+def import_capture(path, state, layout=None):
     """
     Record what a vendor-software session wrote, so the GUI knows what's on
     the pad. Only bindings followed by a commit count - the vendor app can
@@ -828,7 +852,7 @@ def import_capture(path, state):
             done.extend(pending)
             pending = []
             continue
-        decoded = decode_config(report)
+        decoded = decode_config(report, layout or state.layout)
         if decoded:
             pending = [p for p in pending if p[:2] != decoded[:2]] + [decoded]
     for control, layer, binding in done:
@@ -907,11 +931,11 @@ def read_info(device):
     return None
 
 
-def read_layer(device, layer=1):
+def read_layer(device, layer=1, layout=None):
     """{control: Binding} for one layer, as it is on the pad right now."""
     out = {}
     for reply in _exchange(device.path, proto.native_read(device.report_id, layer)):
-        decoded = decode_config(reply)
+        decoded = decode_config(reply, layout)
         if not decoded:
             continue
         control, got_layer, binding = decoded
@@ -920,9 +944,9 @@ def read_layer(device, layer=1):
     return out
 
 
-def read_into_state(device, state, layer=1):
+def read_into_state(device, state, layer=1, layout=None):
     """Read the pad and make the shadow state match it. Returns what was read."""
-    bindings = read_layer(device, layer)
+    bindings = read_layer(device, layer, layout or state.layout)
     if not bindings:
         raise ReadError("the pad didn't answer")
     for control, binding in bindings.items():
@@ -948,12 +972,17 @@ class Detection:
         """
         A first guess at the shape. The pad reports counts, not geometry,
         so rows and columns are a guess the owner should confirm.
+
+        Pads in this family are wider than they are tall, so the guess is
+        the squarest split that keeps rows no greater than columns: 6 keys
+        give 2x3, 12 give 3x4, 15 give 3x5. The old version had this the
+        wrong way round and drew every pad on its side.
         """
         if not self.speaks:
             return None
-        cols = 3 if self.keys % 3 == 0 else (4 if self.keys % 4 == 0 else self.keys)
-        rows = -(-self.keys // cols)
-        return Layout(self.keys, self.knobs, rows, cols)
+        rows = max(r for r in range(1, int(self.keys ** 0.5) + 1)
+                   if self.keys % r == 0)
+        return Layout(self.keys, self.knobs, rows, self.keys // rows)
 
 
 def detect(device):
@@ -995,7 +1024,7 @@ def detect(device):
         if action not in expected or layer != 1:
             continue
         control = probe.control_for_action[action]
-        decoded = decode_config(reply)
+        decoded = decode_config(reply, probe)
         if decoded:
             bindings[control] = decoded[2]
 
