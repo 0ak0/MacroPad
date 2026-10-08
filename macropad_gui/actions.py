@@ -20,7 +20,6 @@ the desktop; it just gets a copy.
 """
 
 import errno
-import fcntl
 import glob
 import json
 import os
@@ -35,6 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import core
+
+try:
+    import fcntl
+except ImportError:              # Windows: no flock, no uinput ioctl
+    fcntl = None
 
 proto = core.proto
 
@@ -265,11 +269,12 @@ class VirtualKeyboard:
     and the first paste would otherwise go missing.
     """
 
-    def __init__(self, path=UINPUT, _open=os.open, _ioctl=fcntl.ioctl,
+    def __init__(self, path=UINPUT, _open=os.open, _ioctl=None,
                  _write=os.write, _sleep=time.sleep):
         import struct
         self._struct, self._write, self._sleep = struct, _write, _sleep
         self.fd = _open(path, os.O_WRONLY | os.O_NONBLOCK)
+        _ioctl = _ioctl or fcntl.ioctl
         _ioctl(self.fd, _UI_SET_EVBIT, _EV_KEY)
         for code in _KEY.values():
             _ioctl(self.fd, _UI_SET_KEYBIT, code)
@@ -568,6 +573,9 @@ def listen(debug=False, log=print):
     Run until stopped. Survives the pad being unplugged, and picks up edits
     to actions.json without a restart.
     """
+    if fcntl is None:
+        log("The actions listener needs /dev/hidraw and uinput, which only exist on Linux.")
+        return 1
     lock_path = runtime_dir() / LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = open(lock_path, "a+")
