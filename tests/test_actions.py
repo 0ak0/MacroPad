@@ -345,3 +345,40 @@ class Themes(unittest.TestCase):
         from macropad_gui import themes
         self.assertTrue((themes.FONTS / "ArchitectsDaughter-Regular.ttf").exists())
         self.assertIn("Open Font License", (themes.FONTS / "OFL.txt").read_text())
+
+
+class WindowsImport(unittest.TestCase):
+    """
+    app.py imports actions to build the window, so actions must import on a
+    system with no fcntl. It used to fail twice: the import itself, and
+    VirtualKeyboard's _ioctl default, which is evaluated at import time.
+    """
+
+    def test_actions_imports_without_fcntl(self):
+        import builtins
+        import sys
+        real = builtins.__import__
+
+        def no_fcntl(name, *a, **k):
+            if name == "fcntl":
+                raise ImportError("No module named 'fcntl'")
+            return real(name, *a, **k)
+
+        saved = {m: sys.modules[m] for m in list(sys.modules)
+                 if m.startswith("macropad_gui.actions") or m == "fcntl"}
+        for m in saved:
+            del sys.modules[m]
+        builtins.__import__ = no_fcntl
+        try:
+            import importlib
+            mod = importlib.import_module("macropad_gui.actions")
+            self.assertIsNone(mod.fcntl)
+            with self.assertRaises(OSError):
+                mod.VirtualKeyboard()
+            self.assertEqual(mod.listen(log=lambda _s: None), 1)
+        finally:
+            builtins.__import__ = real
+            for m in list(sys.modules):
+                if m.startswith("macropad_gui.actions"):
+                    del sys.modules[m]
+            sys.modules.update(saved)

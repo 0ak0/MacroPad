@@ -12,8 +12,44 @@ Most themes only change colours. Two change how the pad is drawn:
 Nord and Catppuccin use their published palettes, both MIT licensed.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Metrics:
+    """
+    The pad's proportions, in board units. The view scales the whole board
+    to fit, so only the ratios between these matter.
+
+    Knobs North's values come from its Figma file: each one is the design's
+    measurement divided by the design's 291.67 unit key and multiplied by
+    our 96, so the proportions are exactly the designer's.
+    """
+    key: float = 96.0             # a key tile, square
+    gap_x: float = 16.0           # between key columns
+    gap_y: float = 16.0           # between key rows
+    margin: float = 30.0          # board edge to anything
+    key_radius: float = 5.0
+    r_out: float = 54.0           # outer reach of a knob's arcs
+    r_in: float = 40.0
+    r_knob: float = 30.0          # the knob body
+    row_h: float = 22.0           # one legend row
+    row_gap: float = 12.0         # knob bottom to first legend row
+    row_sep: float = 0.0          # hairline between rows, 0 for none
+    dial_w: float = 160.0         # legend block width
+    legend_radius: float = 3.0
+    rule_x: float = 0.0           # vertical rule inside the legend block
+    label_x: float = 22.0         # where a legend's text starts
+    byte_pt: float = 10.0         # action byte type size
+    label_pt: float = 13.0        # key legend type size
+    row_pt: float = 12.0          # knob legend type size
+    row_byte_pt: float = 10.0
+    badge: float = 13.0           # the changed / unknown corner flag
+    # Where a key's legend sits, as fractions of the tile: left, top, right,
+    # bottom. Empty keeps the fixed insets that suit a 96 unit key.
+    label_band: tuple = ()
+    byte_inset: tuple = ()        # same, for the action byte
 
 
 @dataclass(frozen=True)
@@ -44,6 +80,24 @@ class Theme:
     caps: bool = False            # legends in capitals, like drawing lettering
     font: str = ""                # legend font; empty means the system font
     mono_legends: bool = False    # draw legends in the monospace font
+    badge: str = "tape"           # pending marker: "tape" strip or "star"
+    legend_box: bool = False      # a border around each knob's three rows
+    query_badge: bool = False     # a "?" in the corner of an unknown key
+    byte_prefix: bool = False     # knob rows read 0x13 rather than 13
+    badge_glyph: str = ""         # a character stamped in the corner flag
+    byte_ink: str = ""            # action byte grey; empty means ink_dim
+    well: str = ""                # gradient's far colour; empty means flat
+    glow: float = 0.0             # neon bloom on accent strokes, board units
+    knob_art: str = ""            # "figma" draws the outline from vectors.py
+    button_radius: int = 4        # window buttons and fields
+    pill_buttons: bool = False    # footer buttons outlined rather than bare
+    outline_primary: bool = False # the write button outlined, not filled
+    ui_pt: int = 0                # base type size; 0 keeps Qt's own
+    title_pt: int = 18            # the inspector's heading
+    mono_status: bool = False     # footer status in the mono face
+    metrics: Metrics = field(default_factory=Metrics)
+    ui_font: str = ""             # window chrome; empty means the system font
+    mono_font: str = ""           # window chrome, monospace parts
     notes: tuple = field(default=())
 
 
@@ -92,15 +146,141 @@ LATTE = Theme(
     hatch="#ccd0da", accent="#8839ef", accent_text="#eff1f5",
     good="#40a02b", bad="#d20f39", line="#bcc0cc", field="#dce0e8")
 
-THEMES = {t.key: t for t in (SILKSCREEN, WHITE_BOARD, BLUEPRINT, SKETCH,
-                             NORD, MOCHA, LATTE)}
-DEFAULT = SILKSCREEN.key
+# Designed in Figma by a member of the community. The palette is Silkscreen's
+# own window and board with a hotter orange and neutral rather than warm greys,
+# so what makes it its own theme is mostly the drawing switches below.
+# Scale factor from the Figma file: its key tile is 291.67 units, ours is 96.
+_F = 96.0 / 291.67
+
+KNOBS_NORTH = Theme(
+    "knobs-north", "Knobs North", True,
+    window="#17191b", board="#202326", ink="#ffffff", ink_dim="#b5b5b5",
+    hatch="#2f2f2f", accent="#ff7700", accent_text="#ffffff",
+    good="#87df9a", bad="#e0584f", line="#6e6e6e", field="#202326",
+    badge="star", badge_glyph="*", legend_box=True, query_badge=True,
+    byte_prefix=True, byte_ink="#505050",
+    # tile and knob gradients, both #202326 falling to #131619 in the file
+    well="#131619", glow=3.2, knob_art="figma",
+    font="Harmattan", mono_font="JetBrains Mono NL", ui_font="Harmattan",
+    button_radius=7, pill_buttons=True, outline_primary=True, ui_pt=15,
+    title_pt=28, mono_status=True,
+    metrics=Metrics(
+        key=96.0,
+        gap_x=88.0 * _F, gap_y=60.58 * _F, margin=74.0 * _F,
+        key_radius=20.0 * _F,
+        r_out=128.58 * _F, r_in=110.0 * _F, r_knob=92.5 * _F,
+        row_h=75.0 * _F, row_gap=40.0 * _F, row_sep=2.0 * _F,
+        dial_w=512.0 * _F, legend_radius=15.0 * _F,
+        rule_x=73.0 * _F, label_x=94.0 * _F,
+        byte_pt=24.0 * _F, label_pt=40.0 * _F,
+        row_pt=40.0 * _F, row_byte_pt=20.0 * _F,
+        badge=64.29 * _F,
+        # The design sets line height to exactly the type size; Qt's is
+        # looser, so the band is taller than the design's 100/300 while
+        # staying centred on the same line.
+        label_band=(38 / 300, 0.18, 37 / 300, 0.18),
+        byte_inset=(19 / 300, 10 / 300)),
+    notes=("Designed in Figma by a member of the community.",
+           "Knobs along the top. Use Rotate view if the drawing is sideways."))
+
+# --------------------------------------------------------------- palettes
+#
+# A palette is colour and nothing else. Anything that decides how the pad is
+# drawn - proportions, badges, knob art, typefaces - belongs to the style.
+
+PALETTE_FIELDS = ("window", "board", "ink", "ink_dim", "hatch", "accent",
+                  "accent_text", "good", "bad", "line", "field", "well",
+                  "byte_ink", "dark")
+
+
+def _palette(theme, **over):
+    """Pull a palette out of a theme written the old way."""
+    out = {f: getattr(theme, f) for f in PALETTE_FIELDS}
+    out.update(over)
+    return out
+
+
+PALETTES = {
+    "graphite": ("Graphite", _palette(SILKSCREEN)),
+    "paper": ("Paper", _palette(WHITE_BOARD)),
+    "nord": ("Nord", _palette(NORD)),
+    "mocha": ("Catppuccin Mocha", _palette(MOCHA)),
+    "latte": ("Catppuccin Latte", _palette(LATTE)),
+    "neon": ("Neon", _palette(KNOBS_NORTH)),
+    "blueprint": ("Blueprint", _palette(BLUEPRINT)),
+    "graph": ("Graph paper", _palette(SKETCH)),
+}
+
+# ----------------------------------------------------------------- styles
+#
+# recolour lists the palettes a style is offered with. Blueprint and Sketch
+# are left alone: a blueprint that isn't blue, or a pencil sketch that isn't
+# on paper, is not the same idea.
+
+OPEN = ("graphite", "paper", "nord", "mocha", "latte", "neon")
+
+STYLES = {
+    "silkscreen": ("Silkscreen", SILKSCREEN, OPEN),
+    "knobs-north": ("Knobs North", KNOBS_NORTH, OPEN),
+    "blueprint": ("Blueprint", BLUEPRINT, ("blueprint",)),
+    "sketch": ("Hand drawn", SKETCH, ("graph",)),
+}
+
+# Keys as they were before styles and palettes were separated, so a saved
+# setting from an older build still finds its theme.
+LEGACY = {
+    "silkscreen": ("silkscreen", "graphite"),
+    "white-board": ("silkscreen", "paper"),
+    "nord": ("silkscreen", "nord"),
+    "catppuccin-mocha": ("silkscreen", "mocha"),
+    "catppuccin-latte": ("silkscreen", "latte"),
+    "blueprint": ("blueprint", "blueprint"),
+    "sketch": ("sketch", "graph"),
+    "knobs-north": ("knobs-north", "neon"),
+}
+_LEGACY_BY_PAIR = {v: k for k, v in LEGACY.items()}
+
+
+def compose(style_key, palette_key):
+    """One style wearing one palette."""
+    style_name, base, _allowed = STYLES[style_key]
+    palette_name, colours = PALETTES[palette_key]
+    key = _LEGACY_BY_PAIR.get((style_key, palette_key),
+                              f"{style_key}/{palette_key}")
+    name = (style_name if len(STYLES[style_key][2]) == 1
+            else f"{style_name} / {palette_name}")
+    return replace(base, key=key, name=name, **colours)
+
+
+THEMES = {}
+for _s, (_sn, _base, _allowed) in STYLES.items():
+    for _p in _allowed:
+        _t = compose(_s, _p)
+        THEMES[_t.key] = _t
+
+DEFAULT = "silkscreen"
+
+
+def parts(key):
+    """(style, palette) for a theme key, old style or new."""
+    if key in LEGACY:
+        return LEGACY[key]
+    if "/" in key:
+        s, p = key.split("/", 1)
+        if s in STYLES and p in PALETTES:
+            return s, p
+    return LEGACY[DEFAULT]
 
 FONTS = Path(__file__).resolve().parent / "fonts"
 
 
 def get(key):
-    return THEMES.get(key, THEMES[DEFAULT])
+    if key in THEMES:
+        return THEMES[key]
+    style, palette = parts(key or DEFAULT)
+    if palette not in STYLES[style][2]:
+        palette = STYLES[style][2][0]
+    return THEMES[compose(style, palette).key]
 
 
 def mix(a, b, t):

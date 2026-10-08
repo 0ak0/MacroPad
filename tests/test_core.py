@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from macropad_gui import core
@@ -304,6 +305,94 @@ class KnobSide(unittest.TestCase):
         knob_l, keys_l = dial_x("left")
         self.assertGreater(knob_r, keys_r, "knobs should sit right of the keys")
         self.assertLess(knob_l, keys_l, "knobs should sit left of the keys")
+
+
+class ThemeCatalogue(unittest.TestCase):
+    """Every theme has to be complete and has to draw without blowing up."""
+
+    def test_knobs_north_is_registered(self):
+        from macropad_gui import themes
+        t = themes.get("knobs-north")
+        self.assertEqual(t.key, "knobs-north")
+        self.assertEqual(t.accent, "#ff7700")
+        self.assertEqual(t.badge, "star")
+        self.assertTrue(t.legend_box and t.query_badge and t.byte_prefix)
+
+    def test_the_other_styles_are_untouched(self):
+        """Drawing switches belong to the style, so recolouring never moves them."""
+        from macropad_gui import themes
+        for key, t in themes.THEMES.items():
+            if themes.parts(key)[0] == "knobs-north":
+                continue
+            self.assertEqual(t.badge, "tape", key)
+            self.assertFalse(t.legend_box, key)
+            self.assertFalse(t.query_badge, key)
+            self.assertFalse(t.byte_prefix, key)
+            self.assertEqual(t.metrics, themes.Metrics(), key)
+
+    def test_the_old_keys_still_resolve(self):
+        from macropad_gui import themes
+        for old in ("silkscreen", "white-board", "nord", "catppuccin-mocha",
+                    "catppuccin-latte", "blueprint", "sketch", "knobs-north"):
+            self.assertEqual(themes.get(old).key, old, old)
+
+    def test_the_grid_multiplies_out(self):
+        from macropad_gui import themes
+        want = sum(len(allowed) for _n, _b, allowed in themes.STYLES.values())
+        self.assertEqual(len(themes.THEMES), want)
+        # every style keeps its drawing switches whatever colours it wears
+        for style, (_n, base, allowed) in themes.STYLES.items():
+            for pal in allowed:
+                t = themes.get(themes.compose(style, pal).key)
+                self.assertEqual(t.metrics, base.metrics, f"{style}/{pal}")
+                self.assertEqual(t.badge, base.badge, f"{style}/{pal}")
+                self.assertEqual(t.accent, themes.PALETTES[pal][1]["accent"])
+
+    def test_a_style_refuses_colours_it_does_not_offer(self):
+        from macropad_gui import themes
+        # blueprint is only itself; asking for nord gives blueprint back
+        self.assertEqual(themes.get("blueprint/nord").key, "blueprint")
+
+    def test_junk_keys_fall_back(self):
+        from macropad_gui import themes
+        for junk in ("", "nonsense", "nope/also-nope", "silkscreen/nope"):
+            self.assertIn(themes.get(junk).key, themes.THEMES)
+
+    def test_every_theme_has_a_full_palette(self):
+        from macropad_gui import themes
+        fields = ("window", "board", "ink", "ink_dim", "hatch", "accent",
+                  "accent_text", "good", "bad", "line", "field")
+        for key, t in themes.THEMES.items():
+            for f in fields:
+                value = getattr(t, f)
+                self.assertRegex(value, r"^#[0-9a-fA-F]{6}$", f"{key}.{f}")
+
+    def test_every_theme_paints(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from macropad_gui import padview, themes
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        QApplication.instance() or QApplication([])
+        lay = core.Layout(12, 2, 3, 4)
+        try:
+            for key, theme in themes.THEMES.items():
+                padview.apply_theme(theme)
+                for orientation in ("flat", "upright"):
+                    v = padview.PadView()
+                    v.set_layout(lay)
+                    v.set_orientation(orientation)
+                    v.resize(700, 600)
+                    v.looks = {c: padview.Look("Ctrl+Z", known=True)
+                               for c in lay.control_ids}
+                    v.looks["key2"] = padview.Look("Ctrl+S", pending=True)
+                    v.looks["key3"] = padview.Look()          # unknown
+                    v.current = "dial1-push"
+                    shot = v.grab().toImage()
+                    self.assertFalse(shot.isNull(), f"{key} / {orientation}")
+        finally:
+            padview.apply_theme(themes.get(themes.DEFAULT))
 
 
 class BoardBalance(unittest.TestCase):
@@ -768,9 +857,17 @@ class PermissionDiagnosis(unittest.TestCase):
         self.assertFalse(any(c.startswith("sudo mv") for c in d.fix))
 
     def test_no_rule(self):
+        """
+        The fix has to write a rule for every vendor the app can talk to,
+        into the file that loads early enough. How it gets written there
+        is the rule writer's business: one vendor is an echo, several need
+        a printf, and pinning the command shape here just breaks the test
+        the next time a pad family is added.
+        """
         d = self.diag([], set())
-        self.assertTrue(d.fix[0].startswith("echo 'KERNEL==\"hidraw*\""))
         self.assertIn("60-macropad.rules", d.fix[0])
+        for vendor in core.vendors():
+            self.assertIn(f'=="{vendor}"', d.fix[0], vendor)
 
     def test_other_family_pad_is_refused_not_ignored(self):
         from unittest import mock
@@ -915,3 +1012,122 @@ class ThemedDrawing(unittest.TestCase):
         # it wanders, but only a little
         box = a.boundingRect()
         self.assertLess(abs(box.width() - 96), 5)
+
+
+class WindowStaysPutWhenYouClick(unittest.TestCase):
+    """
+    Clicking the first control used to make the window jump to full height,
+    on Linux and on Windows. The inspector's content is taller than the pad,
+    and with nothing to contain it the window's minimum height grew to fit,
+    which the window manager then obeyed. It lives in a scroll area now.
+    """
+
+    def window(self, theme):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from unittest import mock
+        from PySide6.QtWidgets import QApplication
+        from macropad_gui import app as A
+        ready = core.Diagnosis("ready", "Ready.", device=core.Device(
+            path="/dev/null-pad", report_id=3, writable=True,
+            vid="1189", pid="8840"))
+        QApplication.instance() or QApplication([])
+        A.apply_theme(QApplication.instance(), theme)
+        with mock.patch.object(core, "_keyd_warning", return_value=None), \
+                mock.patch.object(core, "diagnose", return_value=ready):
+            w = A.Window()
+        w.timer.stop()
+        w.diag = ready
+        return w, QApplication
+
+    def test_minimum_height_does_not_grow_on_the_first_click(self):
+        try:
+            from macropad_gui import themes
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        for key in ("silkscreen", "knobs-north", "blueprint"):
+            with tempfile.TemporaryDirectory() as d, \
+                    mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
+                w, qapp = self.window(key)
+                w.resize(1000, 800)
+                w.show()
+                qapp.processEvents()
+                before = w.centralWidget().minimumSizeHint().height()
+                for control in ("key1", "dial1-left", "key7"):
+                    w.pad.select(control)
+                    w._refresh()
+                    qapp.processEvents()
+                after = w.centralWidget().minimumSizeHint().height()
+                self.assertEqual(before, after, f"{key}: {before} -> {after}")
+                w.close()
+
+    def test_the_window_can_still_be_made_small(self):
+        try:
+            from macropad_gui import themes                        # noqa: F401
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
+            w, qapp = self.window("silkscreen")
+            w.resize(1000, 800)
+            w.show()
+            qapp.processEvents()
+            w.pad.select("key1")
+            w._refresh()
+            qapp.processEvents()
+            w.resize(800, 520)
+            qapp.processEvents()
+            self.assertLessEqual(w.height(), 540, "window refused to shrink")
+            w.close()
+
+    def test_the_inspector_is_inside_something_that_scrolls(self):
+        try:
+            from PySide6.QtWidgets import QScrollArea
+        except ImportError:
+            self.skipTest("PySide6 not installed")
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": d}):
+            w, _ = self.window("silkscreen")
+            self.assertIsInstance(w.panel, QScrollArea)
+            self.assertIs(w.panel.widget(), w.inspector)
+            self.assertTrue(w.panel.widgetResizable())
+            w.close()
+
+
+class VersionIsLabelled(unittest.TestCase):
+    """
+    One version string, in one place, reachable from everywhere that quotes
+    it. A release should be one line to change, and a bug report should
+    never be missing it.
+    """
+
+    def test_it_is_a_plain_semver(self):
+        import re
+        from macropad_gui import __version__
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
+
+    def test_the_cli_reports_it(self):
+        self.assertEqual(proto.version(), __import__("macropad_gui").__version__)
+
+    def test_the_cli_survives_being_copied_out_on_its_own(self):
+        """
+        macropad.py is meant to work as a single file. With no GUI package
+        beside it the version is unknown, which is fine, but it must not
+        raise.
+        """
+        from unittest import mock
+        real = __import__("builtins").__import__
+
+        def no_gui(name, *a, **kw):
+            if name == "macropad_gui":
+                raise ImportError("not there")
+            return real(name, *a, **kw)
+
+        with mock.patch("builtins.__import__", no_gui):
+            self.assertEqual(proto.version(), "unknown")
+
+    def test_a_detection_report_carries_it(self):
+        from macropad_gui import __version__
+        device = core.Device(path="/dev/hidraw9", vid="1189", pid="8840",
+                             report_id=0, writable=True, name="")
+        text = core.detection_report(device, core.Detection(why="it said nothing"))
+        self.assertIn(__version__, text)

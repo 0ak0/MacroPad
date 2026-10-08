@@ -16,11 +16,12 @@ import zlib
 from dataclasses import dataclass
 
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF,
+from PySide6.QtGui import (QRadialGradient, QBrush, QColor, QFont, QFontDatabase, QFontMetricsF,
                            QPainter, QPainterPath, QPen, QTransform)
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from . import core, themes
+from .vectors import KNOB_ARC
 
 THEME = themes.get(themes.DEFAULT)
 
@@ -35,12 +36,24 @@ TAPE = QColor(THEME.accent)       # Kapton orange, in the default theme
 
 
 def apply_theme(theme):
-    global THEME
+    global THEME, K, G, GY, M, R_OUT, R_IN, R_KNOB, ROW_H, ROW_GAP, ROW_SEP
+    global DIAL_W, KEY_R, LEGEND_R, RULE_X, LABEL_X
+    global BYTE_PT, LABEL_PT, ROW_PT, ROW_BYTE_PT, BADGE
     THEME = theme
     for colour, value in ((WINDOW, theme.window), (BOARD, theme.board),
                           (INK, theme.ink), (INK_DIM, theme.ink_dim),
                           (HATCH, theme.hatch), (TAPE, theme.accent)):
         colour.setRgba(QColor(value).rgba())
+    m = theme.metrics
+    K, G, GY, M = m.key, m.gap_x, m.gap_y, m.margin
+    R_OUT, R_IN, R_KNOB = m.r_out, m.r_in, m.r_knob
+    ROW_H, ROW_GAP, ROW_SEP = m.row_h, m.row_gap, m.row_sep
+    DIAL_W = m.dial_w
+    KEY_R, LEGEND_R = m.key_radius, m.legend_radius
+    RULE_X, LABEL_X = m.rule_x, m.label_x
+    BYTE_PT, LABEL_PT = m.byte_pt, m.label_pt
+    ROW_PT, ROW_BYTE_PT = m.row_pt, m.row_byte_pt
+    BADGE = m.badge
 
 
 _FAMILIES = None
@@ -92,11 +105,19 @@ def _wobble_path(path, amount, seed, step=4.0):
             out.lineTo(q)
     return out
 
-# Geometry in board units; the view scales it to fit.
-K, G, M = 96.0, 16.0, 30.0        # key size, gap, board margin
-R_OUT, R_IN, R_KNOB = 54.0, 40.0, 30.0
-ROW_H, ROW_GAP = 22.0, 12.0
-DIAL_W = 160.0
+# Geometry in board units; the view scales it to fit. These come from the
+# active theme's Metrics and are refreshed by apply_theme, so a theme can
+# change the pad's proportions and not just its colours.
+_M = themes.Metrics()
+K, G, GY, M = _M.key, _M.gap_x, _M.gap_y, _M.margin
+R_OUT, R_IN, R_KNOB = _M.r_out, _M.r_in, _M.r_knob
+ROW_H, ROW_GAP, ROW_SEP = _M.row_h, _M.row_gap, _M.row_sep
+DIAL_W = _M.dial_w
+KEY_R, LEGEND_R = _M.key_radius, _M.legend_radius
+RULE_X, LABEL_X = _M.rule_x, _M.label_x
+BYTE_PT, LABEL_PT, ROW_PT, ROW_BYTE_PT = (_M.byte_pt, _M.label_pt,
+                                          _M.row_pt, _M.row_byte_pt)
+BADGE = _M.badge
 
 @dataclass
 class Look:
@@ -149,8 +170,15 @@ class PadView(QWidget):
         self._wobbler = QTimer(self)
         self._wobbler.setInterval(130)
         self._wobbler.timeout.connect(self._tick)
-        self.mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+        self._sys_mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         self._layout()
+
+    @property
+    def mono(self):
+        """The theme's monospace face when it ships one, else the system's."""
+        if THEME.mono_font and THEME.mono_font in _families():
+            return QFont(THEME.mono_font)
+        return self._sys_mono
 
     # ------------------------------------------------------------ public
 
@@ -209,7 +237,7 @@ class PadView(QWidget):
         left = lay.knob_side == "left" and bool(lay.knobs)
 
         keys_w = grid_cols * (K + G) - G
-        keys_h = grid_rows * (K + G) - G
+        keys_h = grid_rows * (K + GY) - GY
         # how much room the knobs need across, and down from the first centre
         dials_w = lay.knobs * (DIAL_W + G) - G if lay.knobs else 0
         dials_h = (R_OUT + (lay.knobs - 1) * (stack + 20 + R_OUT) + stack
@@ -243,17 +271,21 @@ class PadView(QWidget):
         for r in range(grid_rows):
             for c in range(grid_cols):
                 self.cells[(r, c)] = QRectF(grid_left + c * (K + G),
-                                            grid_top + r * (K + G), K, K)
+                                            grid_top + r * (K + GY), K, K)
         for key, r, c in _key_grid(lay, self.orientation):
             self.keys[key] = self.cells[(r, c)]
 
         for dial, centre in zip(lay.dial_ids, dial_centres):
             self.dials[dial] = centre
             top = centre.y() + R_OUT + ROW_GAP
+            # With a boxed legend the rows butt together and the block's own
+            # colour shows through as a hairline; otherwise they are loose.
+            inset = 0.0 if THEME.legend_box else 6.0
+            step = ROW_H + ROW_SEP
             for i, act in enumerate(core.DIAL_ACTIONS):
                 self.rows[f"{dial}-{act}"] = QRectF(
-                    centre.x() - DIAL_W / 2 + 6, top + i * ROW_H,
-                    DIAL_W - 12, ROW_H)
+                    centre.x() - DIAL_W / 2 + inset, top + i * step,
+                    DIAL_W - 2 * inset, ROW_H)
 
         boxes = list(self.cells.values()) + list(self.rows.values())
         right = max(r.right() for r in boxes)
@@ -274,13 +306,41 @@ class PadView(QWidget):
 
     # ----------------------------------------------------------- hit test
 
+    def _arc_outline(self, c, mirror):
+        """
+        One turn arc, built from the outline in the Figma file. Coordinates
+        there are multiples of the knob's radius measured from its centre,
+        so this works at any size. The clockwise arc is the same shape
+        mirrored.
+        """
+        path = QPainterPath()
+        s = R_KNOB
+        for op, a in KNOB_ARC:
+            pts = [QPointF(c.x() + (-a[i] if mirror else a[i]) * s,
+                           c.y() + a[i + 1] * s)
+                   for i in range(0, len(a), 2)]
+            if op == "M":
+                path.moveTo(pts[0])
+            elif op == "L":
+                path.lineTo(pts[0])
+            elif op == "Q":
+                path.quadTo(pts[0], pts[1])
+            elif op == "C":
+                path.cubicTo(pts[0], pts[1], pts[2])
+            else:
+                path.closeSubpath()
+        return path
+
     def _segment(self, dial, act):
         """Clickable area for one dial action, in board units."""
         c = self.dials[dial]
         path = QPainterPath()
         if act == "push":
-            path.addEllipse(c, R_IN - 2, R_IN - 2)
+            path.addEllipse(c, (R_KNOB if THEME.knob_art else R_IN) - 2,
+                            (R_KNOB if THEME.knob_art else R_IN) - 2)
             return path
+        if THEME.knob_art == "figma":
+            return self._arc_outline(c, mirror=(act == "right"))
         start, span = (100, 160) if act == "left" else (-80, 160)
         outer = QRectF(c.x() - R_OUT, c.y() - R_OUT, 2 * R_OUT, 2 * R_OUT)
         inner = QRectF(c.x() - R_IN, c.y() - R_IN, 2 * R_IN, 2 * R_IN)
@@ -494,7 +554,8 @@ class PadView(QWidget):
         """roomy: there's space to spare, as on a keycap; not on a dial legend."""
         if THEME.font and THEME.font in _families():
             f = QFont(THEME.font)
-            f.setPixelSize(px + (2 if roomy else 0))   # handwriting reads small
+            # handwriting reads small; a normal face does not need the bump
+            f.setPixelSize(px + (2 if roomy and THEME.wobble else 0))
         elif THEME.mono_legends:
             f = QFont(self.mono)
             f.setPixelSize(px - 1)
@@ -616,8 +677,58 @@ class PadView(QWidget):
             i += 1
         p.restore()
 
+    # ----------------------------------------------------------- surfaces
+
+    @staticmethod
+    def _well_brush(rect, radial=False):
+        """
+        The tile and knob gradients. Figma calls the tile one a diamond
+        gradient, which Qt has no equivalent for; a radial one reaching the
+        corners is the closest honest approximation and reads the same, as a
+        face that darkens towards its edge.
+        """
+        if not THEME.well:
+            return QColor(THEME.board)
+        c = rect.center()
+        r = (math.hypot(rect.width(), rect.height()) / 2 if not radial
+             else max(rect.width(), rect.height()) / 2)
+        g = QRadialGradient(c, r)
+        g.setColorAt(0.0, QColor(THEME.board))
+        g.setColorAt(0.75 if radial else 0.745, QColor(THEME.board))
+        g.setColorAt(0.9 if radial else 1.0, QColor(THEME.well))
+        g.setColorAt(1.0, QColor(THEME.well))
+        return QBrush(g)
+
+    def _glow(self, p, path, colour):
+        """
+        A few wide, nearly transparent passes under a stroke, so an accent
+        edge blooms the way it does in the design.
+        """
+        if not THEME.glow:
+            return
+        p.save()
+        p.setBrush(Qt.NoBrush)
+        for i, (width, alpha) in enumerate(((THEME.glow, 26),
+                                            (THEME.glow * 0.6, 44),
+                                            (THEME.glow * 0.3, 70))):
+            c = QColor(colour)
+            c.setAlpha(alpha)
+            pen = QPen(c, width)
+            pen.setJoinStyle(Qt.RoundJoin)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawPath(path)
+        p.restore()
+
     def _tape(self, p, at, length=30.0, width=9.0):
-        """A strip of Kapton stuck across a corner."""
+        """
+        The marker for an edit that hasn't reached the pad yet. Normally a
+        strip of Kapton across the corner; "star" themes stamp a little
+        asterisk tile instead.
+        """
+        if THEME.badge == "star":
+            self._star_badge(p, at, max(11.0, width * 1.6))
+            return
         p.save()
         p.translate(at)
         p.rotate(45)
@@ -628,37 +739,123 @@ class PadView(QWidget):
         p.drawRect(QRectF(-length / 2, -width / 2, length, width))
         p.restore()
 
+    @staticmethod
+    def _corner_path(rect, tl=0.0, tr=0.0, br=0.0, bl=0.0):
+        """
+        A rectangle with each corner rounded by its own radius, built as one
+        continuous outline. Adding overlapping sub-paths instead would cancel
+        under the odd-even fill rule and leave the shape hollow.
+        """
+        path = QPainterPath()
+        path.moveTo(rect.left() + tl, rect.top())
+        path.lineTo(rect.right() - tr, rect.top())
+        if tr:
+            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + tr)
+        path.lineTo(rect.right(), rect.bottom() - br)
+        if br:
+            path.quadTo(rect.right(), rect.bottom(),
+                        rect.right() - br, rect.bottom())
+        path.lineTo(rect.left() + bl, rect.bottom())
+        if bl:
+            path.quadTo(rect.left(), rect.bottom(), rect.left(), rect.bottom() - bl)
+        path.lineTo(rect.left(), rect.top() + tl)
+        if tl:
+            path.quadTo(rect.left(), rect.top(), rect.left() + tl, rect.top())
+        path.closeSubpath()
+        return path
+
+    def _star_badge(self, p, at, size=16.0):
+        """A filled tile with an asterisk on it, for a knob row."""
+        box = QRectF(at.x() - size / 2, at.y() - size / 2, size, size)
+        self._flag_shape(p, box, THEME.badge_glyph or "*", QColor(TAPE),
+                         QColor(THEME.accent_text))
+
+    def _corner_flag(self, p, rect, glyph, fill, pen_colour, italic=False):
+        """
+        The tab tucked into a key's top right corner: square, with only the
+        inner corner rounded, so it reads as folded into the tile.
+        """
+        size = min(BADGE, rect.width() * 0.26)
+        box = QRectF(rect.right() - size - KEY_R * 0.35,
+                     rect.top() + KEY_R * 0.18, size, size)
+        self._flag_shape(p, box, glyph, fill, pen_colour, italic)
+
+    def _flag_shape(self, p, box, glyph, fill, pen_colour, italic=False):
+        p.save()
+        r = box.width() * 0.28
+        # square against the tile's own corner, rounded on the two inner ones
+        path = self._corner_path(box, tl=r, tr=0.0, br=r, bl=0.0)
+        p.setPen(Qt.NoPen)
+        p.setBrush(fill)
+        p.drawPath(path)
+        f = QFont(self.mono)
+        f.setPixelSize(max(7, round(box.height() * 0.95)))
+        f.setWeight(QFont.ExtraBold)
+        f.setItalic(italic)
+        p.setFont(f)
+        p.setPen(pen_colour)
+        # the asterisk sits high in the em box; nudge it back to the middle
+        lift = box.height() * (0.18 if glyph == "*" else 0.0)
+        p.drawText(box.translated(0, lift), Qt.AlignCenter, glyph)
+        p.restore()
+
     def _paint_key(self, p, key, rect):
         look = self.looks.get(key, Look())
         path = QPainterPath()
-        path.addRoundedRect(rect, 5, 5)
+        path.addRoundedRect(rect, KEY_R, KEY_R)
         unknown = not look.known and not look.pending
+        if THEME.well:
+            p.fillPath(path, self._well_brush(rect))
         if unknown:
             self._unknown_fill(p, path, rect, key)
+        if key == self.current or look.pending:
+            self._glow(p, path, TAPE)
         self._stroke(p, path, self._outline_pen(key, look.known or look.pending), key)
 
         f = QFont(self.mono)
-        f.setPixelSize(10)
+        f.setPixelSize(max(6, round(BYTE_PT)))
+        if THEME.mono_font:
+            f.setItalic(True)
+            f.setWeight(QFont.Bold)
         p.setFont(f)
-        p.setPen(INK_DIM)
-        p.drawText(rect.adjusted(8, 6, -8, -6), Qt.AlignLeft | Qt.AlignTop,
+        p.setPen(QColor(THEME.byte_ink) if THEME.byte_ink else INK_DIM)
+        bi = THEME.metrics.byte_inset
+        byte_at = (rect.adjusted(bi[0] * rect.width(), bi[1] * rect.height(),
+                                 -bi[0] * rect.width(), 0)
+                   if bi else rect.adjusted(6, 4, -6, -4))
+        p.drawText(byte_at, Qt.AlignLeft | Qt.AlignTop,
                    f"0x{core.action_byte(key):02x}")
 
-        f = self._legend_font(13)
+        f = self._legend_font(round(LABEL_PT))
         p.setFont(f)
-        if look.pending:
+        if key == self.current:
             p.setPen(TAPE)
+        elif look.pending:
+            # the design marks a change with the corner flag, not the words
+            p.setPen(TAPE if not THEME.badge_glyph else INK)
         else:
             p.setPen(INK if look.known and not look.quiet else INK_DIM)
         text = self._lettering(look.text if (look.known or look.pending) else "Unknown")
-        body = rect.adjusted(8, 22, -8, -10)
+        lb = THEME.metrics.label_band
+        body = (QRectF(rect.left() + lb[0] * rect.width(),
+                       rect.top() + lb[1] * rect.height(),
+                       rect.width() * (1 - lb[0] - lb[2]),
+                       rect.height() * (1 - lb[1] - lb[3]))
+                if lb else rect.adjusted(8, 22, -8, -10))
         # Let 'Meta+Ctrl+Left' break after a '+' instead of being cut off.
         text = text.replace("+", "+\u200b")
         p.drawText(body, Qt.AlignCenter | Qt.TextWordWrap,
                    self._fit(text, f, body))
 
         if look.pending:
-            self._tape(p, QPointF(rect.right() - 7, rect.top() + 7))
+            if THEME.badge == "star":
+                self._corner_flag(p, rect, THEME.badge_glyph or "*",
+                                  QColor(TAPE), QColor(THEME.accent_text))
+            else:
+                self._tape(p, QPointF(rect.right() - 7, rect.top() + 7))
+        elif unknown and THEME.query_badge:
+            self._corner_flag(p, rect, "?", QColor(THEME.hatch), INK_DIM,
+                              italic=True)
 
     def _paint_turn_icon(self, p, centre, clockwise, colour):
         r = 5.5
@@ -688,12 +885,16 @@ class PadView(QWidget):
             look = self.looks.get(control, Look())
             seg = self._segment(dial, act)
             if act != "push":
+                if THEME.well:
+                    p.fillPath(seg, self._well_brush(seg.boundingRect()))
                 if not look.known and not look.pending:
                     self._unknown_fill(p, seg, seg.boundingRect(), control, 7.0)
                 if control == self.current:
                     fill = QColor(TAPE)
-                    fill.setAlpha(55)
+                    fill.setAlpha(55 if not THEME.glow else 28)
                     p.fillPath(seg, fill)
+                if control == self.current or look.pending:
+                    self._glow(p, seg, TAPE)
                 self._stroke(p, seg, self._outline_pen(control, look.known or look.pending),
                              control)
 
@@ -701,12 +902,16 @@ class PadView(QWidget):
         look = self.looks.get(push, Look())
         knob = QPainterPath()
         knob.addEllipse(c, R_KNOB, R_KNOB)
+        if THEME.well:
+            p.fillPath(knob, self._well_brush(knob.boundingRect(), radial=True))
         if not look.known and not look.pending:
             self._unknown_fill(p, knob, knob.boundingRect(), push, 7.0)
         if push == self.current:
             fill = QColor(TAPE)
-            fill.setAlpha(55)
+            fill.setAlpha(55 if not THEME.glow else 28)
             p.fillPath(knob, fill)
+        if push == self.current or look.pending:
+            self._glow(p, knob, TAPE)
         self._stroke(p, knob, self._outline_pen(push, look.known or look.pending), push)
         # knurling, the way a footprint marks a rotary encoder
         if not THEME.wobble:
@@ -726,13 +931,31 @@ class PadView(QWidget):
         p.drawText(label, Qt.AlignCenter, self._lettering(f"Dial {dial[4:]}"))
 
         # Legend rows: the silkscreen text next to the part.
+        if THEME.legend_box:
+            self._paint_legend_box(p, dial)
         for act in core.DIAL_ACTIONS:
             control = f"{dial}-{act}"
             self._paint_row(p, control, act, self.rows[control])
 
+    def _paint_legend_box(self, p, dial):
+        """
+        One knob's three rows sit on a plate the colour of the dividing
+        lines. The rows are painted over it leaving the plate showing as a
+        hairline between them, which is how the design draws its separators.
+        """
+        boxes = [self.rows[f"{dial}-{a}"] for a in core.DIAL_ACTIONS]
+        rect = boxes[0].united(boxes[-1]).adjusted(-ROW_SEP, -ROW_SEP,
+                                                   ROW_SEP, ROW_SEP)
+        p.setPen(QPen(QColor(THEME.line), ROW_SEP))
+        p.setBrush(QColor(THEME.line))
+        p.drawRoundedRect(rect, LEGEND_R, LEGEND_R)
+
     def _paint_row(self, p, control, act, rect):
         look = self.looks.get(control, Look())
         is_cur = control == self.current
+        if THEME.legend_box:
+            self._paint_boxed_row(p, control, act, rect, look, is_cur)
+            return
         if is_cur or control == self.hover:
             bg = QColor(TAPE if is_cur else INK)
             bg.setAlpha(40 if is_cur else 18)
@@ -753,19 +976,84 @@ class PadView(QWidget):
         mono.setPixelSize(10)
         p.setFont(mono)
         p.setPen(INK_DIM)
+        prefix = "0x" if THEME.byte_prefix else ""
         p.drawText(rect.adjusted(0, 0, -4, 0), Qt.AlignRight | Qt.AlignVCenter,
-                   f"{core.action_byte(control):02x}")
+                   f"{prefix}{core.action_byte(control):02x}")
 
         f = self._legend_font(12, roomy=False)
         p.setFont(f)
         p.setPen(TAPE if look.pending else
                  (INK if look.known and not look.quiet else INK_DIM))
         text = self._lettering(look.text if (look.known or look.pending) else "Unknown")
-        body = rect.adjusted(22, 0, -26, 0)
+        # the action byte sits on the right; leave room for the wider 0x form
+        body = rect.adjusted(22, 0, -36 if THEME.byte_prefix else -26, 0)
         p.drawText(body, Qt.AlignLeft | Qt.AlignVCenter,
                    QFontMetricsF(f).elidedText(text, Qt.ElideRight, body.width()))
         if look.pending:
             self._tape(p, QPointF(rect.left() - 4, rect.top() + 3), 14, 6)
+
+    def _paint_boxed_row(self, p, control, act, rect, look, is_cur):
+        """
+        One row of a boxed legend: a filled tile, a turn or press icon, a
+        vertical rule, the legend, and the action byte on the right.
+        """
+        first = act == core.DIAL_ACTIONS[0]
+        last = act == core.DIAL_ACTIONS[-1]
+        r = LEGEND_R
+        path = self._corner_path(rect,
+                                 tl=r if first else 0.0, tr=r if first else 0.0,
+                                 br=r if last else 0.0, bl=r if last else 0.0)
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(self._well_brush(rect) if THEME.well else QColor(THEME.board))
+        p.drawPath(path)
+        if not look.known and not look.pending:
+            self._unknown_fill(p, path, rect, control, 7.0)
+        if is_cur or look.pending:
+            self._glow(p, path, TAPE)
+            pen = QPen(QColor(TAPE), ROW_SEP * 1.6)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+        elif control == self.hover:
+            glow = QColor(INK)
+            glow.setAlpha(18)
+            p.setPen(Qt.NoPen)
+            p.setBrush(glow)
+            p.drawPath(path)
+
+        colour = (QColor(TAPE) if (look.pending or is_cur)
+                  else (INK if look.known and not look.quiet else INK_DIM))
+        icon_c = QPointF(rect.left() + RULE_X / 2, rect.center().y())
+        if act == "push":
+            p.setPen(Qt.NoPen)
+            p.setBrush(colour)
+            p.drawEllipse(icon_c, rect.height() * 0.11, rect.height() * 0.11)
+        else:
+            self._paint_turn_icon(p, icon_c, act == "right", colour)
+
+        p.setPen(QPen(QColor(THEME.line), ROW_SEP))
+        p.drawLine(QPointF(rect.left() + RULE_X, rect.top()),
+                   QPointF(rect.left() + RULE_X, rect.bottom()))
+
+        mono = QFont(self.mono)
+        mono.setPixelSize(max(6, round(ROW_BYTE_PT)))
+        mono.setItalic(True)
+        mono.setWeight(QFont.Bold)
+        p.setFont(mono)
+        p.setPen(QColor(THEME.byte_ink or THEME.ink_dim))
+        p.drawText(rect.adjusted(0, 0, -RULE_X * 0.25, 0),
+                   Qt.AlignRight | Qt.AlignVCenter,
+                   f"0x{core.action_byte(control):02x}")
+
+        f = self._legend_font(round(ROW_PT), roomy=False)
+        p.setFont(f)
+        p.setPen(colour)
+        text = self._lettering(look.text if (look.known or look.pending)
+                               else "Unknown")
+        body = rect.adjusted(LABEL_X, 0, -RULE_X * 1.1, 0)
+        p.drawText(body, Qt.AlignLeft | Qt.AlignVCenter,
+                   QFontMetricsF(f).elidedText(text, Qt.ElideRight, body.width()))
 
     @staticmethod
     def _fit(text, font, rect):

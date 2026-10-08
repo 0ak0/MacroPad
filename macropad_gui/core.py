@@ -46,17 +46,30 @@ DIAL_ACTIONS = ("left", "push", "right")
 WRITE_GAP = 0.02      # same pause the CLI leaves between reports
 
 
-def action_byte(control):
+def backends():
     """
-    The byte the pad uses for one control. Keys count from 1; knobs start
-    at 0x10, three apiece. Confirmed on 1189:8840 both by writing and by
-    reading back, and it is what the pad reports for its own slots.
+    The backend registry. Imported late because the backends import this
+    module for its data types, and a top level import either way would be
+    circular.
     """
-    control = control.lower()
-    if control.startswith("key"):
-        return int(control[3:])
-    dial, act = control.split("-")
-    return proto.KNOB_BASE + (int(dial[4:]) - 1) * 3 + DIAL_ACTIONS.index(act)
+    from . import backends as registry
+    return registry
+
+
+def backend_for(device):
+    """Whichever family owns this device; the default when there is none."""
+    return backends().for_device(device)
+
+
+def action_byte(control, backend=None):
+    """
+    The slot number one control lives in.
+
+    Slot numbering belongs to the protocol, so this is the backend's answer.
+    The default is the CH57x family, which is what every caller that does
+    not have a device in hand wants.
+    """
+    return (backend or backends().DEFAULT).action_byte(control)
 
 
 @dataclass(frozen=True)
@@ -414,8 +427,13 @@ class State:
     should call record()/mark_unknown(); the GUI just reads it.
     """
 
-    def __init__(self, path=None, layout=None):
-        self.path = Path(path) if path else config_dir() / f"state-{VID}-{PID}.json"
+    def __init__(self, path=None, layout=None, device_id=None):
+        # The default name is the one the app has always used, so upgrading
+        # never orphans somebody's bindings. A second family would pass its
+        # own id and get its own file.
+        self.device_id = device_id or DEVICE_ID
+        default = config_dir() / f"state-{self.device_id.replace(':', '-')}.json"
+        self.path = Path(path) if path else default
         self.entries = {}                    # (layer, control) -> Entry
         self.layout = layout or DEFAULT_LAYOUT
         if self.path.exists():
@@ -449,7 +467,7 @@ class State:
             else:
                 d = {"binding": e.binding.to_json(), "written": e.written}
             layers.setdefault(str(layer), {})[control] = d
-        _atomic_write_json(self.path, {"format": FORMAT, "device": DEVICE_ID,
+        _atomic_write_json(self.path, {"format": FORMAT, "device": self.device_id,
                                        "layout": self.layout.to_json(),
                                        "layers": layers})
 
@@ -497,7 +515,26 @@ SUGGESTED_RULE = "60-macropad.rules"
 # Vendor wide on purpose. Pads in this family have several product ids, and
 # a rule tied to one of them leaves everybody else unable to read their own
 # hardware, which is exactly the point at which they give up.
-RULE_LINE = f'KERNEL=="hidraw*", ATTRS{{idVendor}}=="{VID}", TAG+="uaccess"'
+def rule_lines():
+    """One uaccess rule per vendor we support."""
+    return [b.udev_rule() for b in backends().REGISTRY]
+
+
+RULE_LINE = (f'KERNEL=="hidraw*", ATTRS{{idVendor}}=="{VID}", '
+             f'TAG+="uaccess"')
+
+
+def rule_command():
+    """
+    The shell line that installs access rules for every family we support.
+    One vendor today, so it reads the same as it always has; a second
+    backend adds its own line here rather than needing the text edited.
+    """
+    lines = rule_lines()
+    if len(lines) == 1:
+        return f"echo '{lines[0]}' | sudo tee /etc/udev/rules.d/{SUGGESTED_RULE}"
+    body = "\\n".join(lines)
+    return f"printf '{body}\\n' | sudo tee /etc/udev/rules.d/{SUGGESTED_RULE}"
 
 
 
@@ -552,14 +589,24 @@ def _udev_tags(devpath):
     return tags
 
 
+def vendors():
+    """Every USB vendor id any backend knows about."""
+    return {b.vid.lower() for b in backends().REGISTRY}
+
+
+def discover():
+    """Config-capable hidraw nodes belonging to any family we support."""
+    return proto.find_devices(vendors())
+
+
 def _on_usb_bus():
+    want = vendors()
     for d in glob.glob("/sys/bus/usb/devices/*"):
         try:
             v = open(os.path.join(d, "idVendor")).read().strip().lower()
-            p = open(os.path.join(d, "idProduct")).read().strip().lower()
         except OSError:
             continue
-        if (v, p) == (VID, PID):
+        if v in want:
             return True
     return False
 
@@ -608,8 +655,12 @@ def diagnose(keyd=True):
                     "the roadmap."])
 
     warnings = [w for w in (_keyd_warning() if keyd else None,) if w]
-    everything = proto.find_devices()
-    found = [d for d in everything if d["pid"] == PID]
+    everything = discover()
+    # A device is "known" only when some backend is confirmed on its exact
+    # id. A sibling under the same vendor shows up as unsupported, which is
+    # what puts the detect button in front of its owner.
+    found = [d for d in everything
+             if backends().for_vid_pid(d["vid"], d["pid"])]
 
     if not found and everything:
         other = everything[0]
@@ -632,7 +683,7 @@ def diagnose(keyd=True):
                         "may name a single product id; this one covers every "
                         "pad from the same maker.",
                         "Run these, then unplug the pad and plug it back in."]
-            d.fix = [f"echo '{RULE_LINE}' | sudo tee /etc/udev/rules.d/{SUGGESTED_RULE}",
+            d.fix = [rule_command(),
                      "sudo udevadm control --reload-rules && sudo udevadm trigger"]
         return d
 
@@ -695,7 +746,7 @@ def diagnose(keyd=True):
         diag.detail = ["No udev rule lets you write to the pad yet. Running "
                        "the installer again adds it, or paste these commands "
                        "into a terminal:"]
-        diag.fix = [f"echo '{RULE_LINE}' | sudo tee /etc/udev/rules.d/{SUGGESTED_RULE}",
+        diag.fix = [rule_command(),
                     "sudo udevadm control --reload-rules && sudo udevadm trigger",
                     "# then unplug and replug the pad"]
     return diag
@@ -729,88 +780,27 @@ def _explain(err):
 
 def write_binding(device, control, binding, state, layer=1, _write=None):
     """
-    Send one binding (config report + commit) and update the shadow state.
-    Raises WriteError; on success the state file is already saved.
+    Send one binding and update the shadow state. Raises WriteError; on
+    success the state file is already saved.
     """
-    write = _write or proto.write_report
-    reports = binding.reports(device.report_id, action_byte(control), layer)
-
-    sent = 0
-    try:
-        for r in reports:
-            write(device.path, r)
-            sent += 1
-            time.sleep(WRITE_GAP)
-    except OSError as e:
-        why = _explain(e)
-        # If even the first write failed on open, nothing reached the pad.
-        untouched = sent == 0 and e.errno in (errno.ENOENT, errno.ENODEV,
-                                              errno.EACCES, errno.EPERM)
-        if not untouched:
-            state.mark_unknown(control, f"write interrupted after {sent} of "
-                               f"{len(reports)} reports: {why}", layer)
-            state.save()
-        raise WriteError(f"{control}: {why}", pad_touched=not untouched, cause=e)
-
-    state.record(control, binding, layer)
-    state.save()
+    return backend_for(device).write(device, control, binding, state, layer,
+                                     _write)
 
 
 # --------------------------------------------------------------- decoding
 
-def decode_info(report):
-    """(keys, knobs) from a 0xFB reply, or None."""
-    if len(report) < 4 or report[1] != proto.MAGIC_INFO:
-        return None
-    return report[2], report[3]
+def decode_info(report, backend=None):
+    """(keys, knobs) from an info reply, or None."""
+    return (backend or backends().DEFAULT).decode_info(report)
 
 
-def decode_config(report, layout=None):
+def decode_config(report, layout=None, backend=None):
     """
     The inverse of Binding.reports()[0]: (control, layer, Binding) from a
-    native config report, or None if it isn't one we understand. Used to
-    import captures and to prove round trips in the tests.
-
-    layout decides which slots count as real controls, and it matters more
-    than it looks. The firmware answers for 15 keys and 3 knobs whatever
-    the pad actually has, so the caller has to say how big the pad is.
-    Decode a 15 key pad against the default 12 key layout and keys 13 to 15
-    and the whole third knob are dropped on the floor without a word.
+    config report, or None if it isn't one we understand. Used to import
+    captures and to prove round trips in the tests.
     """
-    if len(report) < 13 or report[1] not in (proto.MAGIC_NATIVE, proto.MAGIC_READ):
-        return None
-    action, layer, kind = report[2], report[3], report[4]
-    control = (layout or DEFAULT_LAYOUT).control_for_action.get(action)
-    if control is None:
-        return None
-    delay = report[5] | (report[6] << 8)
-    count = report[10]
-
-    if kind == proto.KeyType.MULTIMEDIA and count:
-        media = _MEDIA_BY_USAGE.get(report[11] | (report[12] << 8))
-        return (control, layer, Binding(media=media)) if media else None
-
-    if count == 0 and kind in (proto.KeyType.NONE, proto.KeyType.BASIC):
-        mods, code = report[11], report[12]
-        if not mods and not code:
-            return control, layer, Binding(none=True)
-        return None
-
-    if kind in (proto.KeyType.NONE, proto.KeyType.BASIC) and count:
-        steps = []
-        for i in range(count):
-            off = 11 + 2 * i
-            if off + 1 >= len(report):
-                return None
-            mods, code = report[off], report[off + 1]
-            names = [n for n, bit in _MOD_ORDER if mods & bit]
-            if code:
-                if code not in _KEYNAME_BY_CODE:
-                    return None
-                names.append(_KEYNAME_BY_CODE[code])
-            steps.append("+".join(names))
-        return control, layer, Binding(keys=",".join(steps), delay=delay)
-    return None
+    return (backend or backends().DEFAULT).decode_config(report, layout)
 
 
 def is_commit(report):
@@ -924,24 +914,12 @@ def _exchange(path, request, want=None):
 
 def read_info(device):
     """(keys, knobs) as the pad reports them, or None if it doesn't answer."""
-    for reply in _exchange(device.path, proto.native_info(device.report_id), want=1):
-        got = decode_info(reply)
-        if got:
-            return got
-    return None
+    return backend_for(device).info(device)
 
 
 def read_layer(device, layer=1, layout=None):
     """{control: Binding} for one layer, as it is on the pad right now."""
-    out = {}
-    for reply in _exchange(device.path, proto.native_read(device.report_id, layer)):
-        decoded = decode_config(reply, layout)
-        if not decoded:
-            continue
-        control, got_layer, binding = decoded
-        if got_layer == layer:
-            out[control] = binding
-    return out
+    return backend_for(device).read_layer(device, layer, layout)
 
 
 def read_into_state(device, state, layer=1, layout=None):
@@ -966,85 +944,53 @@ class Detection:
     layers: int = 0
     bindings: dict = field(default_factory=dict)
     why: str = ""                 # when speaks is False, what went wrong
+    grid: tuple = ()              # (rows, cols) when the pad reports geometry
+    model: str = ""               # what the pad calls itself, if it says
 
     @property
     def layout(self):
         """
-        A first guess at the shape. The pad reports counts, not geometry,
-        so rows and columns are a guess the owner should confirm.
+        The shape to draw. Use the pad's own geometry when it reports any,
+        and guess from the key count when it doesn't.
 
-        Pads in this family are wider than they are tall, so the guess is
-        the squarest split that keeps rows no greater than columns: 6 keys
-        give 2x3, 12 give 3x4, 15 give 3x5. The old version had this the
-        wrong way round and drew every pad on its side.
+        The CH57x only reports counts, so for that family this is a guess
+        the owner should confirm. Pads in it are wider than they are tall,
+        so the guess is the squarest split that keeps rows no greater than
+        columns: 6 keys give 2x3, 12 give 3x4, 15 give 3x5. The old
+        version had this the wrong way round and drew every pad on its
+        side.
         """
         if not self.speaks:
             return None
+        if self.grid and self.grid[0] * self.grid[1] == self.keys:
+            rows, cols = self.grid
+            return Layout(self.keys, self.knobs, rows, cols, self.model)
         rows = max(r for r in range(1, int(self.keys ** 0.5) + 1)
                    if self.keys % r == 0)
-        return Layout(self.keys, self.knobs, rows, self.keys // rows)
+        return Layout(self.keys, self.knobs, rows, self.keys // rows,
+                      self.model)
 
 
 def detect(device):
     """
-    Ask an unknown pad what it is, without configuring anything.
-
-    Both commands are queries. We only conclude the pad speaks this
-    protocol if it answers both in the right shape: a well formed info
-    reply, and a layer whose controls are exactly the slots that reply
-    implies. A pad from a different family will fail one of those and we
-    leave it alone.
+    Ask an unknown pad what it is, without configuring anything. Which
+    questions get asked is the backend's business; what comes back is a
+    Detection either way.
     """
-    try:
-        info = read_info(device)
-    except ReadError as e:
-        return Detection(why=f"it didn't answer: {e}")
-    if not info:
-        return Detection(why="it didn't answer the 'what are you' query")
-
-    keys, knobs = info
-    if not 1 <= keys <= proto.KEY_SLOTS or not 0 <= knobs <= proto.KNOB_SLOTS:
-        return Detection(why=f"it reported {keys} keys and {knobs} knobs, "
-                             "which isn't a pad this protocol can describe")
-
-    probe = Layout(keys, knobs, rows=keys, cols=1)      # geometry irrelevant here
-    expected = set(probe.control_for_action)
-
-    try:
-        replies = _exchange(device.path, proto.native_read(device.report_id, 1))
-    except ReadError as e:
-        return Detection(why=f"it answered the first query but not the second: {e}")
-
-    seen, bindings = set(), {}
-    for reply in replies:
-        if len(reply) < 13 or reply[1] != proto.MAGIC_READ:
-            continue
-        action, layer = reply[2], reply[3]
-        seen.add(action)
-        if action not in expected or layer != 1:
-            continue
-        control = probe.control_for_action[action]
-        decoded = decode_config(reply, probe)
-        if decoded:
-            bindings[control] = decoded[2]
-
-    missing = expected - seen
-    if missing:
-        return Detection(why=f"it described {keys} keys and {knobs} knobs but "
-                             f"didn't report {len(missing)} of them, so this "
-                             "isn't the protocol it speaks")
-
-    return Detection(speaks=True, keys=keys, knobs=knobs,
-                     layers=proto.LAYERS, bindings=bindings)
+    return backend_for(device).detect(device)
 
 
 def detection_report(device, detected):
     """A block of text to paste into an issue when adding a new pad."""
-    lines = [f"Device: {device.vid}:{device.pid}",
+    from . import __version__
+    backend = backend_for(device)
+    lines = [f"MacroPad {__version__}",
+             f"Device: {device.vid}:{device.pid}",
              f"Name:   {device.name or 'not reported'}",
-             f"Node:   {device.path}, report id {device.report_id}", ""]
+             f"Node:   {device.path}, report id {device.report_id}",
+             f"Tried:  {backend.name} ({backend.key})", ""]
     if not detected.speaks:
-        lines += ["This pad did NOT answer the 1189:8840 protocol.",
+        lines += [f"This pad did NOT answer the {backend.name} protocol.",
                   f"Reason: {detected.why}"]
         return "\n".join(lines)
     lines += [f"The pad reports {detected.keys} keys and {detected.knobs} knobs.",
