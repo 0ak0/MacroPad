@@ -30,15 +30,18 @@ import signal
 import subprocess
 import sys
 import time
+
+try:
+    import fcntl
+except ImportError:
+    # Windows has none. Everything that needs it is Linux only anyway, and
+    # each use checks. Importing this module must not fail, because app.py
+    # imports it to build the window.
+    fcntl = None
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import core
-
-try:
-    import fcntl
-except ImportError:              # Windows: no flock, no uinput ioctl
-    fcntl = None
 
 proto = core.proto
 
@@ -272,9 +275,16 @@ class VirtualKeyboard:
     def __init__(self, path=UINPUT, _open=os.open, _ioctl=None,
                  _write=os.write, _sleep=time.sleep):
         import struct
+        # Resolved here, not in the signature: a default argument is
+        # evaluated when the module is imported, which on Windows would
+        # crash before the window ever got a chance to open.
+        if _ioctl is None:
+            if fcntl is None:
+                raise OSError("a virtual keyboard needs /dev/uinput, which "
+                              "this system hasn't got")
+            _ioctl = fcntl.ioctl
         self._struct, self._write, self._sleep = struct, _write, _sleep
         self.fd = _open(path, os.O_WRONLY | os.O_NONBLOCK)
-        _ioctl = _ioctl or fcntl.ioctl
         _ioctl(self.fd, _UI_SET_EVBIT, _EV_KEY)
         for code in _KEY.values():
             _ioctl(self.fd, _UI_SET_KEYBIT, code)
@@ -573,11 +583,12 @@ def listen(debug=False, log=print):
     Run until stopped. Survives the pad being unplugged, and picks up edits
     to actions.json without a restart.
     """
-    if fcntl is None:
-        log("The actions listener needs /dev/hidraw and uinput, which only exist on Linux.")
-        return 1
     lock_path = runtime_dir() / LOCK
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        log("Background actions are Linux only for now: they need /dev/uinput "
+            "to type, and a file lock to keep one copy running.")
+        return 1
     lock = open(lock_path, "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

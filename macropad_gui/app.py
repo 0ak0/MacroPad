@@ -13,12 +13,13 @@ from PySide6.QtGui import (QActionGroup, QColor, QFont, QFontDatabase,
                            QGuiApplication, QIcon,
                            QPalette)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame,
+                               QScrollArea, QStyle,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget,
                                QCheckBox, QComboBox, QMenu)
 
-from . import actions as act, core, keymap, padview, themes
+from . import __version__, actions as act, core, keymap, padview, themes
 from .padview import INK, INK_DIM, TAPE, WINDOW, Look, PadView
 
 # Set by apply_theme; functions read these when they run, so they follow a
@@ -31,29 +32,71 @@ MEDIA_GRID = [("playpause", "stop"), ("prev", "next"),
               ("brightnessdown", "brightnessup"),
               ("calculator", "mail"), ("browser", "mycomputer")]
 
+def _status(t):
+    """The footer's device line and its last message."""
+    if t.mono_status:
+        return (f'QLabel[role="status"] {{ color: {t.ink}; '
+                f'font-family: "{t.mono_font}"; font-size: 12px; }}\n'
+                f'QLabel[role="message"] {{ font-family: "{t.mono_font}"; '
+                f'font-size: 12px; font-weight: 600; }}')
+    return f'QLabel[role="status"] {{ color: {t.ink_dim}; }}'
+
+
+def _primary(t, tint):
+    """The write button: filled by default, outlined where a theme says so."""
+    if t.outline_primary:
+        return f"""
+QPushButton[role="primary"] {{ background: {t.board}; color: {t.accent};
+              border: 1px solid {t.accent}; border-radius: {t.button_radius}px;
+              font-weight: 600; padding: 8px 16px; }}
+QPushButton[role="primary"]:hover {{ background: {tint(t.board, t.accent, 0.12)}; }}
+QPushButton[role="primary"]:disabled {{ color: {tint(t.window, t.ink_dim, 0.7)};
+              border-color: {tint(t.window, t.line, 0.7)}; }}"""
+    return f"""
+QPushButton[role="primary"] {{ background: {t.accent}; color: {t.accent_text};
+              border: none; border-radius: {t.button_radius}px;
+              font-weight: 600; padding: 8px 16px; }}
+QPushButton[role="primary"]:hover {{ background: {tint(t.accent, t.ink, 0.15)}; }}
+QPushButton[role="primary"]:disabled {{ background: {tint(t.window, t.line, 0.7)}; color: {tint(t.window, t.ink_dim, 0.7)}; }}"""
+
+
+def _flat(t):
+    """Footer buttons: bare text by default, outlined pills where asked."""
+    if t.pill_buttons:
+        return f"""
+QPushButton[role="flat"] {{ background: {t.board}; color: {t.ink};
+              border: 1px solid {t.ink_dim}; border-radius: {t.button_radius}px;
+              padding: 6px 14px; }}
+QPushButton[role="flat"]:hover {{ border-color: {t.ink}; }}
+QPushButton[role="flat"]:disabled {{ color: {t.ink_dim}; border-color: {t.line}; }}"""
+    return f"""
+QPushButton[role="flat"] {{ border: none; color: {t.ink_dim}; padding: 6px 8px; }}
+QPushButton[role="flat"]:hover {{ color: {t.ink}; }}"""
+
+
+INSPECTOR_W = 400      # the side panel's width, without its scrollbar
+
+
 def stylesheet(t):
     """The whole window's look, from one theme."""
     tint = themes.mix
     return f"""
 QWidget {{ color: {t.ink}; background: {t.window}; }}
-QLabel[role="title"] {{ font-size: 18px; font-weight: 600; }}
+QLabel[role="title"] {{ font-size: {t.title_pt}px; font-weight: 600; }}
+{_status(t)}
 QLabel[role="dim"] {{ color: {t.ink_dim}; }}
 QLabel[role="caption"] {{ color: {t.ink_dim}; padding: 14px 0px 0px 0px; margin: 0px; }}
 QLabel[role="value"] {{ font-size: 15px; }}
 QPushButton {{ background: transparent; border: 1px solid {t.line};
-              border-radius: 4px; padding: 6px 12px; }}
+              border-radius: {t.button_radius}px; padding: 6px 12px; }}
 QPushButton:hover {{ border-color: {t.ink_dim}; }}
 QPushButton:checked {{ border-color: {t.accent}; color: {t.accent}; }}
 QPushButton:disabled {{ color: {tint(t.window, t.ink_dim, 0.55)}; border-color: {tint(t.window, t.line, 0.6)}; }}
-QPushButton[role="primary"] {{ background: {t.accent}; color: {t.accent_text};
-              border: none; font-weight: 600; padding: 8px 16px; }}
-QPushButton[role="primary"]:hover {{ background: {tint(t.accent, t.ink, 0.15)}; }}
-QPushButton[role="primary"]:disabled {{ background: {tint(t.window, t.line, 0.7)}; color: {tint(t.window, t.ink_dim, 0.7)}; }}
-QPushButton[role="flat"] {{ border: none; color: {t.ink_dim}; padding: 6px 8px; }}
-QPushButton[role="flat"]:hover {{ color: {t.ink}; }}
+{_primary(t, tint)}
+{_flat(t)}
 QPushButton[role="media"] {{ text-align: left; padding: 7px 10px; }}
-QLineEdit {{ background: {t.field}; border: 1px solid {t.line}; border-radius: 4px;
-            padding: 7px 8px; }}
+QLineEdit {{ background: {t.field}; border: 1px solid {t.line};
+            border-radius: {t.button_radius}px; padding: 7px 8px; }}
 QLineEdit:focus {{ border-color: {t.ink_dim}; }}
 QLineEdit[recording="true"] {{ border-color: {t.accent}; background: {tint(t.field, t.accent, 0.12)}; }}
 QPlainTextEdit {{ background: {t.field}; border: 1px solid {t.line}; border-radius: 4px; }}
@@ -62,6 +105,8 @@ QFrame[role="banner"] {{ border: 1px solid {t.line}; border-left: 3px solid {t.b
 QFrame[role="banner"][tone="quiet"] {{ border-left: 3px solid {t.ink_dim}; }}
 QFrame[role="banner"] QLabel, QFrame[role="banner"] QPushButton {{ background: transparent; }}
 QFrame[role="footer"] {{ border-top: 1px solid {t.line}; }}
+QScrollArea[role="panel"], QWidget[role="panel"] {{ background: {t.window};
+            border: none; }}
 QFrame[role="editbar"] {{ border-top: 1px solid {t.accent}; background: {tint(t.window, t.accent, 0.06)}; }}
 QFrame[role="editbar"] QLabel {{ background: transparent; }}
 QSpinBox {{ background: {t.field}; border: 1px solid {t.line}; border-radius: 4px;
@@ -169,7 +214,7 @@ class Inspector(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setFixedWidth(400)
+        self.setFixedWidth(INSPECTOR_W)
         self.setFixedHeight(800)
         self.control = None
         self._loading = False
@@ -769,8 +814,22 @@ class Window(QMainWindow):
         self.pad.set_layout(self.state.layout)
         self.pad.set_orientation(self.settings.value("orientation", "upright"))
         self.inspector = Inspector()
+        # The inspector can get taller than the window: a long banner, a full
+        # media list, a theme with bigger type. Left to itself it pushes the
+        # window's minimum height past the screen, and clicking the first key
+        # makes the window jump to full height. In a scroll area it keeps its
+        # own height to itself and everything stays reachable.
+        self.panel = QScrollArea()
+        self.panel.setWidget(self.inspector)
+        self.panel.setWidgetResizable(True)
+        self.panel.setFrameShape(QFrame.NoFrame)
+        self.panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.panel.setProperty("role", "panel")
+        self.panel.viewport().setProperty("role", "panel")
+        bar = self.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        self.panel.setFixedWidth(INSPECTOR_W + bar)
         body.addWidget(self.pad, 1)
-        body.addWidget(self.inspector)
+        body.addWidget(self.panel)
         outer.addLayout(body, 1)
 
         # editor bar, hidden unless you're rearranging the pad
@@ -813,26 +872,53 @@ class Window(QMainWindow):
         fl.setContentsMargins(16, 8, 16, 8)
         self.dot = QLabel()
         self.dot.setFixedSize(9, 9)
-        self.status = _label("", "dim")
-        self.message = _label("")
+        self.status = _label("", "status")
+        self.message = _label("", "message")
         self.edit_btn = _button("Edit layout", "flat")
         self.edit_btn.setToolTip("Rearrange the drawing to match your pad")
         self.read_btn = _button("Read pad", "flat")
         self.read_btn.setToolTip("Ask the pad what's on it right now")
         self.theme_btn = _button("Theme", "flat")
         self.theme_btn.setToolTip("Change how MacroPad looks")
+        # Style decides how the pad is drawn, colours only recolour it, so
+        # the menu offers them separately rather than as one long list.
         self.theme_menu = QMenu(self)
-        self.theme_group = QActionGroup(self)
-        self.theme_group.setExclusive(True)
+        self.style_group = QActionGroup(self)
+        self.style_group.setExclusive(True)
+        self.colour_group = QActionGroup(self)
+        self.colour_group.setExclusive(True)
+        self.colour_actions = {}
         current = self.settings.value("theme", themes.DEFAULT)
-        for t in themes.THEMES.values():
-            a = self.theme_menu.addAction(t.name)
+        style_now, palette_now = themes.parts(current)
+
+        head = self.theme_menu.addAction("Style")
+        head.setEnabled(False)
+        for key, (name, _base, _allowed) in themes.STYLES.items():
+            a = self.theme_menu.addAction("   " + name)
             a.setCheckable(True)
-            a.setChecked(t.key == current)
-            a.setData(t.key)
-            self.theme_group.addAction(a)
+            a.setChecked(key == style_now)
+            a.setData(("style", key))
+            self.style_group.addAction(a)
+        self.theme_menu.addSeparator()
+        head = self.theme_menu.addAction("Colours")
+        head.setEnabled(False)
+        for key, (name, _colours) in themes.PALETTES.items():
+            a = self.theme_menu.addAction("   " + name)
+            a.setCheckable(True)
+            a.setChecked(key == palette_now)
+            a.setData(("palette", key))
+            self.colour_group.addAction(a)
+            self.colour_actions[key] = a
+        self._sync_theme_menu(style_now, palette_now)
+        # The version sits at the foot of the Theme menu rather than in a
+        # menu bar, because there isn't one. It is here to be read off and
+        # quoted in a bug report, so it is deliberately selectable text in
+        # the one menu everybody opens.
+        self.theme_menu.addSeparator()
+        stamp = self.theme_menu.addAction(f"MacroPad {__version__}")
+        stamp.setEnabled(False)
         self.theme_btn.setMenu(self.theme_menu)
-        self.rotate = _button("Rotate view", "flat")
+        self.rotate = _button("Rotate pad", "flat")
         self.import_btn = _button("Import capture…", "flat")
         self.write_all = _button("", "primary")
         fl.addWidget(self.dot)
@@ -863,7 +949,8 @@ class Window(QMainWindow):
         self.pad.rearranged.connect(self._rearranged)
         self.read_btn.clicked.connect(lambda: self._read(quiet=False))
         self.rotate.clicked.connect(self._rotate)
-        self.theme_group.triggered.connect(lambda a: self._set_theme(a.data()))
+        self.style_group.triggered.connect(lambda a: self._set_theme(a.data()))
+        self.colour_group.triggered.connect(lambda a: self._set_theme(a.data()))
         self.import_btn.clicked.connect(self._import)
 
         self.note = core._keyd_warning()
@@ -1304,9 +1391,30 @@ class Window(QMainWindow):
         self._set_layout(lay)
         self.pad.set_editing(True)
 
-    def _set_theme(self, key):
-        t = apply_theme(QApplication.instance(), key)
+    def _sync_theme_menu(self, style, palette):
+        """Grey out colours the chosen style does not offer."""
+        allowed = themes.STYLES[style][2]
+        for key, action in self.colour_actions.items():
+            action.setEnabled(key in allowed)
+            action.setChecked(key == palette)
+
+    def _set_theme(self, data):
+        """data is a theme key, or ("style"|"palette", key) from the menu."""
+        current = self.settings.value("theme", themes.DEFAULT)
+        style, palette = themes.parts(current)
+        if isinstance(data, tuple):
+            which, key = data
+            if which == "style":
+                style = key
+                if palette not in themes.STYLES[style][2]:
+                    palette = themes.STYLES[style][2][0]
+            else:
+                palette = key
+        else:
+            style, palette = themes.parts(data)
+        t = apply_theme(QApplication.instance(), themes.compose(style, palette).key)
         self.settings.setValue("theme", t.key)
+        self._sync_theme_menu(style, palette)
         self._poll()                 # redraws the status dot in the new colours
         self._refresh()
         self.pad.update()
@@ -1365,6 +1473,13 @@ def apply_theme(app, key=None):
     padview.apply_theme(t)
     GOOD, BAD, LINE, FIELD = t.good, t.bad, t.line, t.field
     app.setStyle("Fusion")
+    if t.ui_font and t.ui_font in padview._families():
+        f = QFont(t.ui_font)
+        if t.ui_pt:
+            f.setPixelSize(t.ui_pt)
+        app.setFont(f)
+    else:
+        app.setFont(QFont())
     pal = QPalette()
     for role, colour in ((QPalette.Window, t.window), (QPalette.Base, t.field),
                          (QPalette.Text, t.ink), (QPalette.WindowText, t.ink),

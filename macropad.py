@@ -42,6 +42,9 @@ MODIFIERS = {
     "ctrl": 0x01, "shift": 0x02, "alt": 0x04, "win": 0x08, "super": 0x08,
     "lctrl": 0x01, "lshift": 0x02, "lalt": 0x04, "lwin": 0x08,
     "rctrl": 0x10, "rshift": 0x20, "ralt": 0x40, "rwin": 0x80,
+    # The GUI labels this key Meta, which is what it is called on Linux, so
+    # the CLI accepts that spelling too rather than only win and super.
+    "meta": 0x08, "lmeta": 0x08, "rmeta": 0x80,
 }
 
 # Standard USB HID Keyboard/Keypad usage IDs. Verified against upstream:
@@ -347,8 +350,14 @@ def legacy_media_sequence(report_id, action, usage, layer=0):
 
 KNOWN_VENDORS = ("1189",)
 
-def find_devices():
-    """Find hidraw nodes that expose a vendor-defined 64-byte config interface."""
+def find_devices(vendors=None):
+    """
+    Find hidraw nodes that expose a vendor-defined 64-byte config interface.
+
+    vendors limits the scan to those USB vendor ids; the default is this
+    module's own list. Nothing about the wire format depends on it.
+    """
+    vendors = {v.lower() for v in (vendors or KNOWN_VENDORS)}
     out = []
     for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         dev = os.path.join(node, "device")
@@ -363,7 +372,7 @@ def find_devices():
             continue
         _, v, p = hid_id.split(":")
         vid, pid = v[-4:].lower(), p[-4:].lower()
-        if vid not in KNOWN_VENDORS:
+        if vid not in vendors:
             continue
 
         try:
@@ -403,8 +412,24 @@ def hexdump(b):
     return "\n".join(lines)
 
 
+def version():
+    """
+    The app's version, or 'unknown' if the CLI was copied out on its own.
+
+    macropad.py is meant to work as a single file with nothing beside it, so
+    a missing GUI package is not an error here.
+    """
+    try:
+        from macropad_gui import __version__
+        return __version__
+    except ImportError:
+        return "unknown"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Configure a Holtek-family macro pad.")
+    ap.add_argument("--version", action="version",
+                    version=f"macropad {version()}")
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("list", help="show detected pads")
