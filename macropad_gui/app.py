@@ -170,6 +170,7 @@ class Inspector(QWidget):
     def __init__(self):
         super().__init__()
         self.setFixedWidth(400)
+        self.setFixedHeight(800)
         self.control = None
         self._loading = False
         self.editing_layout = False
